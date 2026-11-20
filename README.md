@@ -1,0 +1,45 @@
+# St James College Management Portal
+
+Responsive React + TypeScript web portal starter for St James College Institute of Technology.
+
+## Run locally
+
+1. Install Node.js LTS.
+2. Run `npm install`.
+3. Configure `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` in `.env.local`.
+4. Run `npm run dev`.
+
+The supplied `.env.local` targets the existing St James Supabase project and is ignored by Git. Never put a Supabase secret or service-role key in frontend configuration.
+
+## Deploy to GitHub Pages
+
+The GitHub Actions workflow builds the app and deploys `dist` on pushes to `main` or `master`. In the repository settings, set **Pages → Build and deployment → Source** to **GitHub Actions**. Add the Actions repository variables `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` so sign-in can connect to Supabase; `.env.local` is intentionally not committed.
+
+## Current scope
+
+The portal includes Supabase email/password sign-in and applicant account creation, password reset, session restoration, role-filtered navigation, responsive layouts, module search, and persisted light/dark mode. Pending users can submit student or staff applications with a photo and supporting documents. Authorized administrators can manage departments and programmes, review applications, approve applicants, and view approved student and staff directories. The attendance module provides lecturer QR sessions, authenticated student scanning, attendance review and correction, audit trails, and filtered exports. Academics, timetable, examinations, finance, library, and reports now query the existing college tables and expose the operations supported by the checked-in schema and RLS policies. Some requested institutional workflows still require additional reviewed schema and trusted backend work; the UI surfaces query and permission errors rather than substituting sample data.
+
+The app does not apply migrations to the live database or create sample records. Student dashboard metrics are scoped to the signed-in student's own enrolments, attendance, upcoming examinations, published results, and visible fee records.
+
+## Database setup
+
+Review the migrations against the live database and apply them in this order:
+
+1. `supabase/migrations/20261117090000_create_college_schema.sql` — additive baseline for profiles, students, staff, academics, attendance, fees, library loans, timetables, audit events, and Row Level Security.
+2. `supabase/migrations/20261117100000_add_non_teaching_staff_role.sql` — compatibility migration for existing databases that already applied an earlier baseline.
+3. `supabase/migrations/20261117101000_registration_workflows.sql` — private application storage, student/staff applications, and approval workflows.
+4. `supabase/migrations/20261117110000_secure_qr_attendance.sql` — adds QR token/audit storage and trusted attendance RPCs while retaining existing attendance records.
+5. `supabase/migrations/20261119090000_college_module_integrity.sql` — adds timetable cancellation state and server-side conflict checks, and adds atomic, role-checked library issue/return operations that maintain book availability.
+6. `supabase/migrations/20261119100000_student_registration_numbers.sql` — configures qualification levels and globally unique course codes, issues immutable `STJIT/COURSE_CODE/0001/YEAR` registration numbers atomically, and records authorized programme transfers.
+
+Before applying any migration, compare it with the live schema and policies in the existing Supabase project. Migration 5 changes timetable read scope and library loan write permissions; reconcile existing library availability counts against outstanding loans before using the new issue/return workflow. Migration 6 requires existing programme codes to be 2–12 letters or numbers and globally unique regardless of letter case; inspect and resolve any invalid or duplicate codes before applying it. Apply migrations only after reviewing affected records and confirming the live schema matches their prerequisites.
+
+After applying the reviewed migrations, create and verify the designated administrator through Supabase Auth, then run `supabase/setup_super_admin.sql` in the Supabase SQL Editor. The bootstrap assigns the super-admin role only to that verified account. Passwords are never stored in SQL or frontend code; use Supabase Auth to set or reset them.
+
+To allow students to sign in with their approved registration number, deploy `supabase/functions/student-login` with JWT verification disabled (`supabase functions deploy student-login --no-verify-jwt`). Configure its `STUDENT_LOGIN_ALLOWED_ORIGINS` secret as a comma-separated list of the exact portal origins, and ensure the function has the standard `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` secrets. The service-role key belongs only in the Edge Function environment and must never be added to frontend configuration. The function resolves a student number to the existing Auth account and exchanges the supplied password through Supabase Auth; students may continue to use their email address as well. Password reset requests still require the account email.
+
+New users can create an account and submit a student or staff application. Email confirmation may be required by the Supabase Auth settings. Until an authorized super administrator, college administrator, or academic registrar approves an application, the account remains pending and cannot access college modules. Administrators should first add active departments and programmes; students can only apply to active programmes. Supabase Storage keeps application files private and limits uploads to 10 MB per file.
+
+For QR attendance, assign lecturers to course offerings, add timetable slots, and enroll active students before opening a session. The database derives the scanning student from their Supabase Auth session, checks enrollment and server time, stores only a hash of each short-lived QR token, and prevents duplicate scans. Lecturer corrections require a reason and are auditable. Students use the camera scanner over HTTPS; lecturers can monitor attendance through Realtime with periodic refresh as a fallback. The QR attendance workflow is unavailable until its migration has been reviewed and applied.
+
+Never put a Supabase secret or service-role key in frontend configuration. Payment writes remain disabled until a trusted payment-provider integration is configured.
