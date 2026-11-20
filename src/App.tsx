@@ -90,8 +90,8 @@ const moduleAccess: Record<CollegeRole, string[]> = {
 const summary = [
   { label: 'Total students', detail: 'Across all programmes', icon: GraduationCap },
   { label: 'Active staff', detail: 'Teaching and administration', icon: Users },
-  { label: 'Attendance today', detail: 'Across scheduled classes', icon: ClipboardCheck },
-  { label: 'Fees collected', detail: 'Current academic year · TZS', icon: CreditCard },
+  { label: 'Attendance today', detail: 'Sessions scheduled today', icon: ClipboardCheck },
+  { label: 'Fees collected', detail: 'Confirmed payments · TZS', icon: CreditCard },
 ]
 
 function App() {
@@ -538,6 +538,146 @@ function Dashboard({
     month: 'long',
     day: 'numeric',
   }).format(new Date())
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [dashboardLoading, setDashboardLoading] = useState(true)
+  const [dashboardError, setDashboardError] = useState('')
+  const [metrics, setMetrics] = useState<Record<string, { value: string; state: 'loading' | 'live' | 'unavailable'; detail: string }>>({})
+  const [activityRows, setActivityRows] = useState<Array<{ id: string; startsAt: string; label: string; status: string }>>([])
+  const [activityState, setActivityState] = useState<'loading' | 'live' | 'unavailable'>('loading')
+
+  useEffect(() => {
+    let active = true
+    async function loadDashboard() {
+      if (role === 'student') return
+      if (!supabase) {
+        setDashboardError('Supabase is not configured.')
+        setMetrics(Object.fromEntries(summary.map((item) => [item.label, {
+          value: '—',
+          state: 'unavailable' as const,
+          detail: 'Supabase is not configured.',
+        }])))
+        setActivityState('unavailable')
+        setDashboardLoading(false)
+        return
+      }
+
+      setDashboardLoading(true)
+      setDashboardError('')
+      setActivityRows([])
+      setActivityState('loading')
+
+      const canReadStudentCount = ['super_admin', 'college_admin', 'academic_registrar', 'examination_officer'].includes(role)
+      const canReadStaffCount = ['super_admin', 'college_admin', 'academic_registrar'].includes(role)
+      const canReadSessions = ['super_admin', 'college_admin', 'academic_registrar', 'examination_officer', 'lecturer'].includes(role)
+      const canReadFees = ['super_admin', 'college_admin', 'finance_accountant', 'bursar'].includes(role)
+
+      const dateParts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Africa/Dar_es_Salaam',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).formatToParts(new Date())
+      const datePart = (type: string) => dateParts.find((part) => part.type === type)?.value ?? ''
+      const dayStart = new Date(`${datePart('year')}-${datePart('month')}-${datePart('day')}T00:00:00+03:00`)
+      const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000)
+
+      try {
+        const [studentResult, staffResult, sessionCountResult, paymentResult, activityResult] = await Promise.all([
+          canReadStudentCount
+            ? supabase.from('college_students').select('id', { count: 'exact', head: true })
+            : Promise.resolve({ count: null, error: null }),
+          canReadStaffCount
+            ? supabase.from('college_staff').select('id', { count: 'exact', head: true }).eq('employment_status', 'active')
+            : Promise.resolve({ count: null, error: null }),
+          canReadSessions
+            ? supabase.from('college_attendance_sessions')
+              .select('id', { count: 'exact', head: true })
+              .gte('starts_at', dayStart.toISOString())
+              .lt('starts_at', dayEnd.toISOString())
+              .neq('session_status', 'cancelled')
+            : Promise.resolve({ count: null, error: null }),
+          canReadFees
+            ? supabase.from('college_payments').select('amount').eq('payment_status', 'confirmed')
+            : Promise.resolve({ data: null, error: null }),
+          canReadSessions
+            ? supabase.from('college_attendance_sessions')
+              .select('id,starts_at,session_status,offering:college_course_offerings(course:college_courses(code,name))')
+              .order('starts_at', { ascending: false })
+              .limit(5)
+            : Promise.resolve({ data: null, error: null }),
+        ])
+        if (!active) return
+
+        const queryErrors = [
+          studentResult.error && `Students: ${studentResult.error.message}`,
+          staffResult.error && `Staff: ${staffResult.error.message}`,
+          sessionCountResult.error && `Attendance: ${sessionCountResult.error.message}`,
+          paymentResult.error && `Fees: ${paymentResult.error.message}`,
+          activityResult.error && `Recent activity: ${activityResult.error.message}`,
+        ].filter((message): message is string => Boolean(message))
+        setDashboardError(queryErrors.join(' · '))
+
+        const metricState = (
+          allowed: boolean,
+          error: { message: string } | null,
+          value: string,
+        ) => ({
+          value: allowed && !error ? value : '—',
+          state: (allowed ? error ? 'unavailable' : 'live' : 'unavailable') as 'live' | 'unavailable',
+          detail: !allowed ? 'Not available for this role' : error ? error.message : '',
+        })
+        setMetrics({
+          'Total students': metricState(canReadStudentCount, studentResult.error, String(studentResult.count ?? 0)),
+          'Active staff': metricState(canReadStaffCount, staffResult.error, String(staffResult.count ?? 0)),
+          'Attendance today': metricState(canReadSessions, sessionCountResult.error, String(sessionCountResult.count ?? 0)),
+          'Fees collected': metricState(
+            canReadFees,
+            paymentResult.error,
+            (paymentResult.data ?? []).reduce((total, payment) => total + Number(payment.amount), 0).toLocaleString(),
+          ),
+        })
+
+        if (!canReadSessions || activityResult.error) {
+          setActivityState('unavailable')
+          setActivityRows([])
+        } else {
+          const rows = (activityResult.data ?? []) as Array<{
+            id: string
+            starts_at: string
+            session_status: string
+            offering: { course: { code: string; name: string } | Array<{ code: string; name: string }> | null } | Array<{ course: { code: string; name: string } | Array<{ code: string; name: string }> | null }> | null
+          }>
+          setActivityRows(rows.map((row) => {
+            const offering = Array.isArray(row.offering) ? row.offering[0] : row.offering
+            const course = offering && (Array.isArray(offering.course) ? offering.course[0] : offering.course)
+            return {
+              id: row.id,
+              startsAt: row.starts_at,
+              label: course ? `${course.code} · ${course.name}` : 'Course session',
+              status: row.session_status,
+            }
+          }))
+          setActivityState('live')
+        }
+      } catch (caught) {
+        if (active) {
+          const errorMessage = caught instanceof Error ? caught.message : 'The dashboard could not be loaded.'
+          setDashboardError(errorMessage)
+          setMetrics(Object.fromEntries(summary.map((item) => [item.label, {
+            value: '—',
+            state: 'unavailable' as const,
+            detail: errorMessage,
+          }])))
+          setActivityState('unavailable')
+        }
+      } finally {
+        if (active) setDashboardLoading(false)
+      }
+    }
+
+    void loadDashboard()
+    return () => { active = false }
+  }, [role, refreshKey])
 
   if (role === 'student') return <StudentOverview userId={userId} onNavigate={onNavigate} />
 
@@ -551,10 +691,9 @@ function Dashboard({
             A clear view of academic and administrative operations.
           </p>
         </div>
-        <span className="inline-flex w-fit items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
-          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-          Some modules need setup
-        </span>
+        <button className="secondary-button w-fit" disabled={dashboardLoading} onClick={() => setRefreshKey((value) => value + 1)} type="button">
+          <RefreshCw size={14} /> Refresh dashboard
+        </button>
       </div>
 
       <div className="mt-7 flex flex-col gap-3 rounded-2xl border border-indigo-100 bg-indigo-50/80 p-4 dark:border-indigo-900/70 dark:bg-indigo-950/30 sm:flex-row sm:items-center sm:p-5">
@@ -562,9 +701,9 @@ function Dashboard({
           <LockKeyhole size={19} />
         </span>
         <div className="flex-1">
-          <p className="text-sm font-semibold">Your account is signed in securely</p>
+          <p className="text-sm font-semibold">Live college overview</p>
           <p className="mt-1 text-xs leading-5 text-slate-600 dark:text-slate-400">
-            Student, finance and staff records will appear after the database schema, role permissions and Row Level Security policies are configured.
+            Counts use live Supabase records and respect the permissions assigned to your account.
           </p>
         </div>
         <a
@@ -577,9 +716,12 @@ function Dashboard({
         </a>
       </div>
 
+      {dashboardError && <p aria-live="polite" className="mt-4 rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">{dashboardError}</p>}
+
       <section aria-label="College metrics" className="mt-7 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {summary.map((item) => {
           const Icon = item.icon
+          const metric = metrics[item.label]
           return (
             <article
               key={item.label}
@@ -589,13 +731,13 @@ function Dashboard({
                 <span className="grid h-10 w-10 place-items-center rounded-xl bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                   <Icon size={19} strokeWidth={1.8} />
                 </span>
-                <span className="rounded-lg bg-slate-50 px-2 py-1 text-[10px] text-slate-500 dark:bg-slate-800">
-                  Not connected
+                <span className={`rounded-lg px-2 py-1 text-[10px] ${metric?.state === 'live' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-slate-50 text-slate-500 dark:bg-slate-800'}`}>
+                  {dashboardLoading ? 'Loading' : metric?.state === 'live' ? 'Live' : 'Unavailable'}
                 </span>
               </div>
-              <p className="mt-5 text-2xl font-bold tracking-tight text-slate-300 dark:text-slate-600">—</p>
+              <p className="mt-5 text-2xl font-bold tracking-tight">{dashboardLoading ? '—' : metric?.value ?? '—'}</p>
               <p className="mt-1 text-xs font-semibold">{item.label}</p>
-              <p className="mt-1 text-[11px] text-slate-500">{item.detail}</p>
+              <p className="mt-1 text-[11px] text-slate-500">{metric?.detail || item.detail}</p>
             </article>
           )
         })}
@@ -605,23 +747,20 @@ function Dashboard({
         <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 dark:border-slate-800 dark:bg-slate-900">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-bold">Academic activity</h3>
-              <p className="mt-1 text-xs text-slate-500">Recent activity will be shown here</p>
+              <h3 className="text-sm font-bold">Recent class sessions</h3>
+              <p className="mt-1 text-xs text-slate-500">Latest attendance sessions visible to your role</p>
             </div>
             <span className="rounded-lg bg-slate-100 px-2.5 py-1.5 text-[10px] font-medium text-slate-500 dark:bg-slate-800">
-              Live data pending
+              {activityState === 'loading' ? 'Loading' : activityState === 'live' ? 'Live' : 'Unavailable'}
             </span>
           </div>
-          <div className="mt-6 grid min-h-48 place-items-center rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-5 text-center dark:border-slate-700 dark:bg-slate-800/30">
-            <div className="max-w-sm">
-              <span className="mx-auto grid h-10 w-10 place-items-center rounded-full bg-white text-slate-400 shadow-sm dark:bg-slate-800">
-                <CalendarDays size={18} />
-              </span>
-              <p className="mt-3 text-xs font-semibold">No academic data connected</p>
-              <p className="mt-1 text-[11px] leading-5 text-slate-500">
-                Once academic tables and access policies are in place, recent activity will appear in this space.
-              </p>
-            </div>
+          <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
+            {activityRows.length ? activityRows.map((row) => (
+              <div className="flex items-center justify-between gap-3 py-3 text-xs" key={row.id}>
+                <span className="font-semibold">{row.label}</span>
+                <span className="text-right text-slate-500">{row.status.replaceAll('_', ' ')} · {new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Africa/Dar_es_Salaam' }).format(new Date(row.startsAt))}</span>
+              </div>
+            )) : <p className="py-8 text-center text-xs text-slate-500">{activityState === 'loading' ? 'Loading sessions…' : activityState === 'unavailable' ? 'Session data is unavailable for this role or the query failed.' : 'No attendance sessions have been created yet.'}</p>}
           </div>
         </section>
 
@@ -676,6 +815,12 @@ function StudentOverview({
   const [results, setResults] = useState<Array<{ title: string; score: number; max_score: number }>>([])
   const [attendance, setAttendance] = useState<{ attended: number; completed: number } | null>(null)
   const [balance, setBalance] = useState<number | null>(null)
+  const [studentProfile, setStudentProfile] = useState<{
+    student_number: string
+    student_status: string
+    study_year: number | null
+    programme: { code: string; name: string } | Array<{ code: string; name: string }> | null
+  } | null>(null)
 
   useEffect(() => {
     let active = true
@@ -688,11 +833,23 @@ function StudentOverview({
       setLoading(true)
       setError('')
       try {
-        const { data: enrollmentRows, error: enrollmentError } = await supabase
-          .from('college_enrollments')
-          .select('course_offering_id,offering:college_course_offerings(academic_year,term,section,course:college_courses(code,name))')
-          .eq('student_id', userId)
-          .eq('enrollment_status', 'enrolled')
+        const [studentResult, enrollmentResult] = await Promise.all([
+          supabase
+            .from('college_students')
+            .select('student_number,student_status,study_year,programme:college_programmes(code,name)')
+            .eq('id', userId)
+            .maybeSingle(),
+          supabase
+            .from('college_enrollments')
+            .select('course_offering_id,offering:college_course_offerings(academic_year,term,section,course:college_courses(code,name))')
+            .eq('student_id', userId)
+            .eq('enrollment_status', 'enrolled'),
+        ])
+        if (studentResult.error) throw studentResult.error
+        if (!studentResult.data) throw new Error('No approved student record was found for this account.')
+        if (active) setStudentProfile(studentResult.data as typeof studentProfile)
+        const enrollmentRows = enrollmentResult.data
+        const enrollmentError = enrollmentResult.error
         if (enrollmentError) throw enrollmentError
 
         const offeringIds = (enrollmentRows ?? []).map((row) => row.course_offering_id)
@@ -765,6 +922,9 @@ function StudentOverview({
   const attendancePercent = attendance && attendance.completed > 0
     ? Math.round((attendance.attended / attendance.completed) * 100)
     : null
+  const studentProgramme = studentProfile
+    ? Array.isArray(studentProfile.programme) ? studentProfile.programme[0] : studentProfile.programme
+    : null
 
   return (
     <div>
@@ -777,6 +937,19 @@ function StudentOverview({
         <button className="secondary-button" disabled={loading} onClick={() => setRefreshKey((value) => value + 1)} type="button"><RefreshCw size={14} /> Refresh</button>
       </header>
       {error && <p aria-live="polite" className="mt-5 rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">{error}</p>}
+      {studentProfile && (
+        <div className="mt-5 rounded-xl border border-indigo-100 bg-indigo-50/70 px-4 py-3 text-xs dark:border-indigo-900/70 dark:bg-indigo-950/30">
+          <p className="font-semibold">{studentProfile.student_number} · {studentProfile.student_status.replaceAll('_', ' ')}</p>
+          <p className="mt-1 text-slate-600 dark:text-slate-400">
+            {studentProgramme ? `${studentProgramme.code} · ${studentProgramme.name}` : 'Programme not set'} · {studentProfile.study_year ? `Year ${studentProfile.study_year}` : 'Study year not set'}
+          </p>
+          {subjects.length === 0 && (
+            <p className="mt-2 text-slate-600 dark:text-slate-400">
+              No course offerings are linked yet. Ask the registrar to assign your study year and map the programme year to the current offerings.
+            </p>
+          )}
+        </div>
+      )}
       {loading ? <div className="grid min-h-64 place-items-center text-sm text-slate-500"><span className="flex items-center gap-2"><span className="loading-dot" />Loading your records…</span></div> : (
         <>
           <section aria-label="My academic overview" className="mt-7 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
