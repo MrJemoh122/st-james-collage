@@ -16,7 +16,9 @@ type Offering = {
   term: number
   section: string
   lecturer_id: string | null
-  course: Related<Pick<Course, 'id' | 'code' | 'name' | 'department_id'>>
+  course: Related<Pick<Course, 'id' | 'code' | 'name' | 'department_id'> & {
+    department?: Related<Pick<Department, 'code' | 'name'>>
+  }>
 }
 type ProgrammeYearOffering = {
   id: string
@@ -96,7 +98,17 @@ function related<T>(value: Related<T> | undefined): T | undefined {
 }
 
 function messageOf(error: unknown) {
-  return error instanceof Error ? error.message : 'The request could not be completed.'
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object') {
+    const values = [
+      'message' in error ? error.message : null,
+      'details' in error ? error.details : null,
+      'hint' in error ? error.hint : null,
+    ]
+    const messages = values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    if (messages.length) return messages.join(' ')
+  }
+  return 'The request could not be completed.'
 }
 
 function usePageData(loader: () => Promise<void>, dependencies: unknown[]) {
@@ -423,7 +435,7 @@ export function TimetablePage({ role, userId }: Props) {
     setLoading(true); setError('')
     try {
       const [offeringResult, enrollmentResult] = await Promise.all([
-        supabase.from('college_course_offerings').select('id,academic_year,term,section,lecturer_id,course:college_courses(id,code,name,department_id)').order('academic_year', { ascending: false }),
+        supabase.from('college_course_offerings').select('id,academic_year,term,section,lecturer_id,course:college_courses(id,code,name,department_id,department:college_departments(code,name))').order('academic_year', { ascending: false }),
         role === 'student'
           ? supabase.from('college_enrollments').select('course_offering_id').eq('student_id', userId).eq('enrollment_status', 'enrolled')
           : Promise.resolve({ data: [], error: null }),
@@ -442,7 +454,7 @@ export function TimetablePage({ role, userId }: Props) {
       const offeringIds = visibleOfferings.map((offering) => offering.id)
       if (!offeringIds.length) { setSlots([]); return }
       const slotResult = await supabase.from('college_timetable_slots')
-        .select('id,course_offering_id,day_of_week,starts_at,ends_at,room,slot_status,offering:college_course_offerings(id,academic_year,term,section,lecturer_id,course:college_courses(id,code,name,department_id))')
+        .select('id,course_offering_id,day_of_week,starts_at,ends_at,room,slot_status,offering:college_course_offerings(id,academic_year,term,section,lecturer_id,course:college_courses(id,code,name,department_id,department:college_departments(code,name)))')
         .in('course_offering_id', offeringIds)
         .order('day_of_week')
         .order('starts_at')
@@ -479,26 +491,36 @@ export function TimetablePage({ role, userId }: Props) {
       ends_at: form.ends_at,
       room: form.room.trim() || null,
     }
-    const result = editingId
-      ? await supabase.from('college_timetable_slots').update(values).eq('id', editingId)
-      : await supabase.from('college_timetable_slots').insert(values)
-    setBusy(false)
-    if (result.error) { setError(result.error.message); return }
-    setSuccess(editingId ? 'Timetable entry updated.' : 'Timetable entry created.')
-    setEditingId('')
-    setForm({ course_offering_id: '', day_of_week: '1', starts_at: '09:00', ends_at: '10:00', room: '' })
-    await load()
+    try {
+      const result = editingId
+        ? await supabase.from('college_timetable_slots').update(values).eq('id', editingId)
+        : await supabase.from('college_timetable_slots').insert(values)
+      if (result.error) { setError(messageOf(result.error)); return }
+      setSuccess(editingId ? 'Timetable entry updated.' : 'Timetable entry created.')
+      setEditingId('')
+      setForm({ course_offering_id: '', day_of_week: '1', starts_at: '09:00', ends_at: '10:00', room: '' })
+      await load()
+    } catch (caught) {
+      setError(messageOf(caught))
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function cancelSlot(slot: Slot) {
     if (!supabase || !canManage || slot.slot_status === 'cancelled') return
     if (!window.confirm('Cancel this timetable entry? The entry will be retained in the timetable history.')) return
     setBusy(true); setError(''); setSuccess('')
-    const { error: updateError } = await supabase.from('college_timetable_slots').update({ slot_status: 'cancelled' }).eq('id', slot.id)
-    setBusy(false)
-    if (updateError) { setError(updateError.message); return }
-    setSuccess('Timetable entry cancelled.')
-    await load()
+    try {
+      const { error: updateError } = await supabase.from('college_timetable_slots').update({ slot_status: 'cancelled' }).eq('id', slot.id)
+      if (updateError) { setError(messageOf(updateError)); return }
+      setSuccess('Timetable entry cancelled.')
+      await load()
+    } catch (caught) {
+      setError(messageOf(caught))
+    } finally {
+      setBusy(false)
+    }
   }
 
   function editSlot(slot: Slot) {
@@ -515,7 +537,8 @@ export function TimetablePage({ role, userId }: Props) {
   const visibleSlots = slots.filter((slot) => {
     const offering = related(slot.offering)
     const course = related(offering?.course)
-    const searchable = `${dayNames[slot.day_of_week - 1] ?? ''} ${course?.code ?? ''} ${course?.name ?? ''} ${offering?.section ?? ''} ${offering?.academic_year ?? ''} ${slot.room ?? ''}`.toLowerCase()
+    const department = related(course?.department)
+    const searchable = `${dayNames[slot.day_of_week - 1] ?? ''} ${department?.code ?? ''} ${department?.name ?? ''} ${course?.code ?? ''} ${course?.name ?? ''} ${offering?.section ?? ''} ${offering?.academic_year ?? ''} ${slot.room ?? ''}`.toLowerCase()
     return searchable.includes(filter.trim().toLowerCase())
   })
 
@@ -523,7 +546,11 @@ export function TimetablePage({ role, userId }: Props) {
     <PageFrame title="Timetable" description="View your assigned or enrolled timetable. Authorized academic staff can create, edit and cancel entries; the database rejects overlapping active bookings." actions={<button className="secondary-button" onClick={() => void load()} type="button"><RefreshCw size={14} /> Refresh</button>}>
       <Notice error={error} success={success} />
       {canManage && <Panel title={editingId ? 'Edit timetable entry' : 'Add timetable entry'}><form className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" onSubmit={saveSlot}>
-        <Field label="Course offering"><SelectInput onChange={(event) => setForm({ ...form, course_offering_id: event.target.value })} required value={form.course_offering_id}><option value="">Select offering</option>{offerings.map((offering) => <option key={offering.id} value={offering.id}>{related(offering.course)?.code} · {offering.section} · {offering.academic_year}</option>)}</SelectInput></Field>
+        <Field label="Department / course offering"><SelectInput onChange={(event) => setForm({ ...form, course_offering_id: event.target.value })} required value={form.course_offering_id}><option value="">Select offering</option>{offerings.map((offering) => {
+          const course = related(offering.course)
+          const department = related(course?.department)
+          return <option key={offering.id} value={offering.id}>{department?.code ?? 'Department'} · {course?.code} · {offering.section} · {offering.academic_year}</option>
+        })}</SelectInput></Field>
         <Field label="Day"><SelectInput onChange={(event) => setForm({ ...form, day_of_week: event.target.value })} value={form.day_of_week}>{dayNames.map((day, index) => <option key={day} value={index + 1}>{day}</option>)}</SelectInput></Field>
         <Field label="Room"><TextInput maxLength={80} onChange={(event) => setForm({ ...form, room: event.target.value })} value={form.room} /></Field>
         <Field label="Start time"><TextInput onChange={(event) => setForm({ ...form, starts_at: event.target.value })} required type="time" value={form.starts_at} /></Field>
@@ -531,10 +558,11 @@ export function TimetablePage({ role, userId }: Props) {
         <div className="flex items-center gap-2"><button className="primary-button self-end" disabled={busy || !offerings.length} type="submit"><Plus size={14} /> {editingId ? 'Save entry' : 'Add entry'}</button>{editingId && <button className="secondary-button self-end" onClick={() => { setEditingId(''); setForm({ course_offering_id: '', day_of_week: '1', starts_at: '09:00', ends_at: '10:00', room: '' }) }} type="button">Cancel edit</button>}</div>
       </form></Panel>}
       <Field label="Filter visible entries"><TextInput onChange={(event) => setFilter(event.target.value)} placeholder="Search subject, class, day or room" value={filter} /></Field>
-      {loading ? <Loading /> : visibleSlots.length ? <Panel title={`Entries (${visibleSlots.length})`}><Table headers={['Day', 'Time', 'Subject', 'Class', 'Lecturer', 'Room', 'Status', ...(canManage ? ['Actions'] : [])]}>{visibleSlots.map((slot) => {
+      {loading ? <Loading /> : visibleSlots.length ? <Panel title={`Entries (${visibleSlots.length})`}><Table headers={['Day', 'Time', 'Department', 'Subject', 'Class', 'Lecturer', 'Room', 'Status', ...(canManage ? ['Actions'] : [])]}>{visibleSlots.map((slot) => {
         const offering = related(slot.offering)
         const course = related(offering?.course)
-        return <Row key={slot.id}><Cell>{dayNames[slot.day_of_week - 1] ?? slot.day_of_week}</Cell><Cell>{slot.starts_at.slice(0, 5)}–{slot.ends_at.slice(0, 5)}</Cell><Cell>{course?.code} · {course?.name}</Cell><Cell>{offering?.section ?? '—'}</Cell><Cell>{offering?.lecturer_id ?? 'Unassigned'}</Cell><Cell>{slot.room ?? '—'}</Cell><Cell>{slot.slot_status}</Cell>{canManage && <Cell><div className="flex gap-2">{slot.slot_status === 'scheduled' && <><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => editSlot(slot)} type="button">Edit</button><button className="text-rose-700" disabled={busy} onClick={() => void cancelSlot(slot)} type="button">Cancel</button></>}</div></Cell>}</Row>
+        const department = related(course?.department)
+        return <Row key={slot.id}><Cell>{dayNames[slot.day_of_week - 1] ?? slot.day_of_week}</Cell><Cell>{slot.starts_at.slice(0, 5)}–{slot.ends_at.slice(0, 5)}</Cell><Cell>{department?.code ?? '—'} · {department?.name ?? ''}</Cell><Cell>{course?.code} · {course?.name}</Cell><Cell>{offering?.section ?? '—'}</Cell><Cell>{offering?.lecturer_id ?? 'Unassigned'}</Cell><Cell>{slot.room ?? '—'}</Cell><Cell>{slot.slot_status}</Cell>{canManage && <Cell><div className="flex gap-2">{slot.slot_status === 'scheduled' && <><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => editSlot(slot)} type="button">Edit</button><button className="text-rose-700" disabled={busy} onClick={() => void cancelSlot(slot)} type="button">Cancel</button></>}</div></Cell>}</Row>
       })}</Table></Panel> : <Empty>No timetable entries are visible to this account.</Empty>}
       {!canManage && <p className="text-xs text-slate-500">Your account has read-only timetable access.</p>}
     </PageFrame>
