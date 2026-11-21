@@ -553,11 +553,19 @@ export function DepartmentsPage({ canManage }: { canManage: boolean }) {
       })
       if (error) {
         setIsError(true)
-        setMessage(error.code === '23505'
-          ? 'A department with that code or name already exists. Choose a unique code and name.'
-          : error.code === '42501'
-            ? `Your account is not permitted to create departments. ${error.message}`
-            : error.message)
+        let errorMessage = error.message
+        if (error.code === '23505') {
+          if (error.message.includes('college_departments_code_key')) {
+            errorMessage = `Department code "${departmentCode}" already exists. Choose a different code.`
+          } else if (error.message.includes('college_departments_name_key')) {
+            errorMessage = `Department name "${departmentName}" already exists. Choose a different name.`
+          } else {
+            errorMessage = 'A department with that code or name already exists. Choose unique values.'
+          }
+        } else if (error.code === '42501') {
+          errorMessage = `Your account is not permitted to create departments. ${error.message}`
+        }
+        setMessage(errorMessage)
         return
       }
       setCode('')
