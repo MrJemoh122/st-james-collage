@@ -94,6 +94,18 @@ const summary = [
   { label: 'Fees collected', detail: 'Confirmed payments · TZS', icon: CreditCard },
 ]
 
+function errorMessage(error: unknown) {
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object') {
+    const message = 'message' in error && typeof error.message === 'string' ? error.message : ''
+    const details = 'details' in error && typeof error.details === 'string' ? error.details : ''
+    const hint = 'hint' in error && typeof error.hint === 'string' ? error.hint : ''
+    const description = [message, details, hint].filter(Boolean).join(' ')
+    if (description) return description
+  }
+  return 'The student records request failed without a readable error message. Check the browser console and Supabase logs.'
+}
+
 function App() {
   const [user, setUser] = useState<User | null>(null)
   const [authLoading, setAuthLoading] = useState(Boolean(supabase))
@@ -852,8 +864,8 @@ function StudentOverview({
         if (!studentResult.data) throw new Error('No approved student record was found for this account.')
         const profileRow = studentResult.data as typeof studentProfile
         if (profileRow?.photo_path && supabase) {
-          const bucket = 'college-registrations'
-          const { data: photo } = await supabase.storage.from(bucket).createSignedUrl(profileRow.photo_path, 300)
+          const { data: photo, error: photoError } = await supabase.storage.from('college-applications').createSignedUrl(profileRow.photo_path, 300)
+          if (photoError) console.error('Unable to load the student profile photo:', photoError.message)
           profileRow.photoUrl = photo?.signedUrl ?? null
         } else if (profileRow) {
           profileRow.photoUrl = null
@@ -921,7 +933,7 @@ function StudentOverview({
         setAttendance({ attended, completed: sessionIds.length })
         setBalance(totalCharges - confirmedPayments)
       } catch (caught) {
-        if (active) setError(caught instanceof Error ? caught.message : 'Your student dashboard could not be loaded.')
+        if (active) setError(errorMessage(caught))
       } finally {
         if (active) setLoading(false)
       }
