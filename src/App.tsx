@@ -253,6 +253,7 @@ function App() {
   const activeModule = visibleModules.find((module) => module.name === page) ?? visibleModules[0] ?? modules[0]
   const PageIcon = activeModule.icon
   const canManageDepartments = role !== null && registrationAdminRoles.includes(role)
+  const canDeleteDepartments = role === 'super_admin' || role === 'college_admin'
 
   return (
     <div className="min-h-screen bg-[#f5f7fb] text-slate-900 dark:bg-slate-950 dark:text-slate-100">
@@ -442,7 +443,7 @@ function App() {
           ) : page === 'Staff' ? (
             <StaffPage />
           ) : page === 'Departments' ? (
-            <DepartmentsPage canManage={canManageDepartments} />
+            <DepartmentsPage canManage={canManageDepartments} canDelete={canDeleteDepartments} />
           ) : page === 'Programmes' ? (
             <ProgrammesPage canManage={canManageDepartments} />
           ) : page === 'Registrations' ? (

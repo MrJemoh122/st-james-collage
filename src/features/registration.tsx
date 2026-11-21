@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import type { User } from '@supabase/supabase-js'
-import { CheckCircle2, FileText, ImagePlus, LoaderCircle, Plus, RefreshCw, ShieldCheck, UserRound } from 'lucide-react'
+import { CheckCircle2, FileText, ImagePlus, LoaderCircle, Plus, RefreshCw, ShieldCheck, Trash2, UserRound } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 
 const bucket = 'college-applications'
@@ -497,7 +497,7 @@ function Field({ label, required, children }: { label: string; required?: boolea
   )
 }
 
-export function DepartmentsPage({ canManage }: { canManage: boolean }) {
+export function DepartmentsPage({ canManage, canDelete }: { canManage: boolean; canDelete: boolean }) {
   const [departments, setDepartments] = useState<Department[]>([])
   const [code, setCode] = useState('')
   const [name, setName] = useState('')
@@ -602,12 +602,49 @@ export function DepartmentsPage({ canManage }: { canManage: boolean }) {
     await loadDepartments()
   }
 
+  async function deleteDepartment(department: Department) {
+    if (!supabase || !canDelete) return
+    const confirmed = window.confirm(
+      `Delete department "${department.name}" (${department.code})? This cannot be undone. Departments linked to other records cannot be deleted.`,
+    )
+    if (!confirmed) return
+
+    setBusy(true)
+    setMessage('')
+    try {
+      const { error } = await supabase
+        .from('college_departments')
+        .delete()
+        .eq('id', department.id)
+      if (error) {
+        setIsError(true)
+        setMessage(error.code === '23503'
+          ? 'This department is linked to other records and cannot be deleted. Deactivate it instead.'
+          : error.code === '42501'
+            ? `Your account is not permitted to delete departments. ${error.message}`
+            : error.message)
+        return
+      }
+      if (await loadDepartments()) {
+        setIsError(false)
+        setMessage('Department deleted.')
+      }
+    } catch (caught) {
+      setIsError(true)
+      setMessage(caught instanceof Error
+        ? caught.message
+        : 'The department could not be deleted. Check your connection and try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="mx-auto max-w-4xl">
       <div>
         <p className="text-xs font-medium text-slate-500">Academic structure</p>
         <h2 className="mt-1 text-2xl font-bold tracking-tight">Departments</h2>
-        <p className="mt-2 text-sm text-slate-500">Manage college departments without deleting records that may be linked to students or staff.</p>
+        <p className="mt-2 text-sm text-slate-500">Manage departments. Departments linked to programmes, courses, staff, or applications cannot be deleted.</p>
       </div>
       {canManage && (
         <form className="mt-6 grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 sm:grid-cols-[1fr_2fr_auto] sm:items-end dark:border-slate-800 dark:bg-slate-900" onSubmit={addDepartment}>
@@ -636,8 +673,13 @@ export function DepartmentsPage({ canManage }: { canManage: boolean }) {
                   {department.is_active ? 'Active' : 'Inactive'}
                 </span>
                 {canManage && (
-                  <button className="secondary-button justify-center" onClick={() => void toggleActive(department)} type="button">
+                  <button className="secondary-button justify-center" disabled={busy} onClick={() => void toggleActive(department)} type="button">
                     {department.is_active ? 'Deactivate' : 'Activate'}
+                  </button>
+                )}
+                {canDelete && (
+                  <button className="secondary-button justify-center text-rose-600" disabled={busy} onClick={() => void deleteDepartment(department)} type="button">
+                    <Trash2 size={14} /> Delete
                   </button>
                 )}
               </div>
