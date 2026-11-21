@@ -56,7 +56,7 @@ export function CreateAccount({ onBack }: { onBack: () => void }) {
       <p className="text-xs font-semibold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">New applicant</p>
       <h2 className="mt-2 text-3xl font-bold tracking-tight">Create an account</h2>
       <p className="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
-        Create a secure sign-in first. Student or staff privileges are only assigned after college approval.
+        Create a secure sign-in to apply for student admission. Lecturer and staff accounts are created by an administrator and activated through a secure email invitation.
       </p>
       <form className="mt-8 space-y-5" onSubmit={submit}>
         <label className="block">

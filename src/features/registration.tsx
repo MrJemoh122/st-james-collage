@@ -32,6 +32,13 @@ export const registrationAdminRoles: CollegeRole[] = [
 type Props = { user: User; onRefresh?: () => void }
 type Department = { id: string; code: string; name: string; is_active: boolean }
 type Programme = { id: string; code: string; name: string; duration_years: number | null }
+type CourseOfferingChoice = {
+  id: string
+  academic_year: string
+  term: number
+  section: string
+  course: Related<{ code: string; name: string; is_active: boolean }>
+}
 type ApplicationFile = { file: File; type: string }
 type Related<T> = T | T[] | null
 type StudentDirectoryEntry = {
@@ -162,7 +169,6 @@ function FileField({
 }
 
 export function ApplicantPortal({ user, onRefresh }: Props) {
-  const [kind, setKind] = useState<'student' | 'staff'>('student')
   const [loading, setLoading] = useState(true)
   const [existing, setExisting] = useState<{ kind: 'student' | 'staff'; status: string } | null>(null)
   const [loadError, setLoadError] = useState('')
@@ -257,9 +263,11 @@ export function ApplicantPortal({ user, onRefresh }: Props) {
                     {existing.kind === 'student' ? 'Student' : 'Staff'} application {existing.status}
                   </p>
                   <p className="mt-1 text-xs leading-5 text-slate-500">
-                    {existing.status === 'approved'
-                      ? 'Your account has been approved. Sign out and sign in again to refresh your role.'
-                      : 'The registrar will review your details and documents. Your account remains restricted while review is pending.'}
+                    {existing.kind === 'staff'
+                      ? 'Staff accounts are now created by the college administrator. Contact the administrator if you need staff access.'
+                      : existing.status === 'approved'
+                        ? 'Your account has been approved. Sign out and sign in again to refresh your role.'
+                        : 'The registrar will review your details and documents. Your account remains restricted while review is pending.'}
                   </p>
                 </div>
               </div>
@@ -274,31 +282,12 @@ export function ApplicantPortal({ user, onRefresh }: Props) {
               </button>
             </div>
           ) : (
-            <>
-              <div className="mt-6 grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1 dark:bg-slate-800">
-                <button
-                  aria-pressed={kind === 'student'}
-                  className={`rounded-lg px-3 py-2.5 text-xs font-semibold ${kind === 'student' ? 'bg-white text-indigo-700 shadow-sm dark:bg-slate-700 dark:text-indigo-200' : 'text-slate-500'}`}
-                  onClick={() => setKind('student')}
-                  type="button"
-                >
-                  Student admission
-                </button>
-                <button
-                  aria-pressed={kind === 'staff'}
-                  className={`rounded-lg px-3 py-2.5 text-xs font-semibold ${kind === 'staff' ? 'bg-white text-indigo-700 shadow-sm dark:bg-slate-700 dark:text-indigo-200' : 'text-slate-500'}`}
-                  onClick={() => setKind('staff')}
-                  type="button"
-                >
-                  Lecturer / staff
-                </button>
-              </div>
-              <div className="mt-6">
-                {kind === 'student'
-                  ? <StudentApplicationForm user={user} onSubmitted={loadApplication} />
-                  : <StaffApplicationForm user={user} onSubmitted={loadApplication} />}
-              </div>
-            </>
+            <div className="mt-6">
+              <StudentApplicationForm user={user} onSubmitted={loadApplication} />
+              <p className="mt-5 border-t border-slate-100 pt-4 text-xs text-slate-500 dark:border-slate-800">
+                Lecturer and non-teaching staff accounts are created by an administrator and activated through a secure email invitation.
+              </p>
+            </div>
           )}
         </section>
       </div>
@@ -307,7 +296,7 @@ export function ApplicantPortal({ user, onRefresh }: Props) {
 }
 
 function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: () => Promise<void> }) {
-  const [programmes, setProgrammes] = useState<Programme[]>([])
+  const [offerings, setOfferings] = useState<CourseOfferingChoice[]>([])
   const [loadError, setLoadError] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
@@ -324,20 +313,20 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
     address: '',
     emergencyName: '',
     emergencyPhone: '',
-    programmeId: '',
-    studyYear: '',
+    courseOfferingIds: [] as string[],
   })
 
   useEffect(() => {
     if (!supabase) return
     supabase
-      .from('college_programmes')
-      .select('id,code,name,duration_years')
-      .eq('is_active', true)
-      .order('name')
+      .from('college_course_offerings')
+      .select('id,academic_year,term,section,course:college_courses(code,name,is_active)')
+      .eq('student_selection_open', true)
+      .order('academic_year', { ascending: false })
+      .order('term')
       .then(({ data, error }) => {
         if (error) setLoadError(error.message)
-        else setProgrammes(data ?? [])
+        else setOfferings(((data ?? []) as CourseOfferingChoice[]).filter((offering) => relationValue(offering.course)?.is_active))
       })
   }, [])
 
@@ -347,6 +336,7 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
     setIsError(false)
     if (!supabase) return showError('Supabase is not configured.')
     if (!photo || !identity || !certificate) return showError('Add a photo, identity document, and academic certificate.')
+    if (form.courseOfferingIds.length < 1) return showError('Choose at least one course offering.')
     if (otherDocuments.length > 6) return showError('You can upload up to six additional documents.')
     if (!isAllowedPhoto(photo)) return showError('Photo must be a JPEG, PNG, or WebP image no larger than 10 MB.')
     let photoSignatureMatches: boolean
@@ -387,7 +377,7 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
         uploadedDocuments.push({ path, name: document.file.name, type: document.type })
       }
 
-      const { error } = await supabase.rpc('submit_college_student_application', {
+      const { error } = await supabase.rpc('submit_college_student_application_with_courses', {
         p_full_name: form.fullName,
         p_phone: form.phone,
         p_date_of_birth: form.dateOfBirth,
@@ -395,10 +385,9 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
         p_home_address: form.address,
         p_emergency_contact_name: form.emergencyName,
         p_emergency_contact_phone: form.emergencyPhone,
-        p_programme_id: form.programmeId,
-        p_study_year: Number(form.studyYear),
         p_photo_path: photoPath,
         p_documents: uploadedDocuments,
+        p_course_offering_ids: form.courseOfferingIds,
       })
       if (error) throw error
       setMessage('Application submitted. Your account will remain pending until the registrar reviews it.')
@@ -420,8 +409,7 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
     setMessage(text)
   }
 
-  if (loadError) return <FormMessage error message={`Could not load active programmes: ${loadError}`} />
-  const selectedProgramme = programmes.find((programme) => programme.id === form.programmeId)
+  if (loadError) return <FormMessage error message={`Could not load course offerings: ${loadError}`} />
 
   return (
     <form className="space-y-5" onSubmit={submit}>
@@ -444,23 +432,6 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
             <option value="prefer_not_to_say">Prefer not to say</option>
           </select>
         </Field>
-        <Field label="Programme" required>
-          <select className="form-input" required value={form.programmeId} onChange={(e) => setForm({ ...form, programmeId: e.target.value, studyYear: '' })}>
-            <option value="">Choose an active programme</option>
-            {programmes.map((programme) => <option key={programme.id} value={programme.id}>{programme.code} — {programme.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Year of study" required>
-          <input
-            className="form-input"
-            max={selectedProgramme?.duration_years ?? undefined}
-            min="1"
-            required
-            type="number"
-            value={form.studyYear}
-            onChange={(e) => setForm({ ...form, studyYear: e.target.value })}
-          />
-        </Field>
         <Field label="Emergency contact name" required>
           <input className="form-input" maxLength={120} required value={form.emergencyName} onChange={(e) => setForm({ ...form, emergencyName: e.target.value })} />
         </Field>
@@ -468,6 +439,23 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
           <input className="form-input" maxLength={30} required type="tel" value={form.emergencyPhone} onChange={(e) => setForm({ ...form, emergencyPhone: e.target.value })} />
         </Field>
       </div>
+      <fieldset className="space-y-3">
+        <legend className="text-xs font-semibold">Choose course offerings <span className="text-rose-500">*</span></legend>
+        <p className="text-[11px] leading-5 text-slate-500">Choose the courses, academic years, and terms you are applying to take. The registrar will assign your programme and confirm these enrolments before approval.</p>
+        {offerings.length ? <div className="grid gap-2 sm:grid-cols-2">{offerings.map((offering) => {
+          const course = relationValue(offering.course)
+          const checked = form.courseOfferingIds.includes(offering.id)
+          return <label className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 text-xs ${checked ? 'border-indigo-400 bg-indigo-50 dark:border-indigo-700 dark:bg-indigo-950/30' : 'border-slate-200 dark:border-slate-700'}`} key={offering.id}>
+            <input checked={checked} onChange={(event) => setForm({
+              ...form,
+              courseOfferingIds: event.target.checked
+                ? [...form.courseOfferingIds, offering.id]
+                : form.courseOfferingIds.filter((id) => id !== offering.id),
+            })} type="checkbox" />
+            <span><span className="block font-semibold">{course?.code} · {course?.name}</span><span className="mt-1 block text-slate-500">{offering.academic_year} · Term {offering.term} · Section {offering.section}</span></span>
+          </label>
+        })}</div> : <p className="rounded-xl border border-dashed border-slate-300 p-4 text-xs text-slate-500 dark:border-slate-700">No course offerings are currently open for application. Contact the registrar.</p>}
+      </fieldset>
       <Field label="Home address" required>
         <textarea className="form-input min-h-20 resize-y py-3" maxLength={500} required value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
       </Field>
@@ -492,170 +480,10 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
       </div>
       {loadError && <FormMessage error message={loadError} />}
       <FormMessage error={isError} message={message} />
-      <button className="primary-button h-11 w-full justify-center sm:w-auto" disabled={busy || programmes.length === 0} type="submit">
+      <button className="primary-button h-11 w-full justify-center sm:w-auto" disabled={busy || offerings.length === 0} type="submit">
         {busy ? <><LoaderCircle className="animate-spin" size={16} /> Uploading application…</> : 'Submit student application'}
       </button>
-      {programmes.length === 0 && <p className="text-xs text-slate-500">Applications open when the registrar adds active programmes.</p>}
-    </form>
-  )
-}
-
-function StaffApplicationForm({ user, onSubmitted }: Props & { onSubmitted: () => Promise<void> }) {
-  const [departments, setDepartments] = useState<Department[]>([])
-  const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState('')
-  const [isError, setIsError] = useState(false)
-  const [loadError, setLoadError] = useState('')
-  const [photo, setPhoto] = useState<File | null>(null)
-  const [cv, setCv] = useState<File | null>(null)
-  const [qualifications, setQualifications] = useState<File[]>([])
-  const [form, setForm] = useState({
-    staffType: 'lecturer',
-    fullName: '',
-    phone: '',
-    departmentId: '',
-    jobTitle: '',
-    qualification: '',
-    experience: '0',
-  })
-
-  useEffect(() => {
-    if (!supabase) return
-    supabase
-      .from('college_departments')
-      .select('id,code,name,is_active')
-      .eq('is_active', true)
-      .order('name')
-      .then(({ data, error }) => {
-        if (error) setLoadError(error.message)
-        else setDepartments(data ?? [])
-      })
-  }, [])
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    setMessage('')
-    setIsError(false)
-    if (!supabase) return showError('Supabase is not configured.')
-    if (!photo || !cv) return showError('Add a photo and CV before submitting.')
-    if (qualifications.length > 7) return showError('You can upload up to seven supporting documents.')
-    if (!isAllowedPhoto(photo)) return showError('Photo must be a JPEG, PNG, or WebP image no larger than 10 MB.')
-    let photoSignatureMatches: boolean
-    try {
-      photoSignatureMatches = await matchesFileSignature(photo)
-    } catch {
-      return showError('Could not read the selected photo. Please choose it again.')
-    }
-    if (!photoSignatureMatches) return showError('The selected photo does not match its file type.')
-    const documents: ApplicationFile[] = [
-      { file: cv, type: 'cv' },
-      ...qualifications.map((file) => ({ file, type: 'qualification' })),
-    ]
-    if (documents.some(({ file }) => !isAllowedDocument(file))) {
-      return showError('Documents must be PDF, JPEG, PNG, or WebP and no larger than 10 MB each.')
-    }
-    let documentSignaturesMatch: boolean
-    try {
-      documentSignaturesMatch = (await Promise.all(documents.map(({ file }) => matchesFileSignature(file)))).every(Boolean)
-    } catch {
-      return showError('Could not read the selected documents. Please choose them again.')
-    }
-    if (!documentSignaturesMatch) {
-      return showError('One or more documents do not match their file type.')
-    }
-
-    setBusy(true)
-    const uploaded: string[] = []
-    try {
-      const photoPath = await uploadFile(user.id, 'staff', 'photo', photo)
-      uploaded.push(photoPath)
-      const uploadedDocuments: UploadedDocument[] = []
-      for (const document of documents) {
-        const path = await uploadFile(user.id, 'staff', 'documents', document.file)
-        uploaded.push(path)
-        uploadedDocuments.push({ path, name: document.file.name, type: document.type })
-      }
-      const { error } = await supabase.rpc('submit_college_staff_application', {
-        p_staff_type: form.staffType,
-        p_full_name: form.fullName,
-        p_phone: form.phone,
-        p_department_id: form.departmentId,
-        p_job_title: form.jobTitle,
-        p_highest_qualification: form.qualification,
-        p_years_experience: Number(form.experience),
-        p_photo_path: photoPath,
-        p_documents: uploadedDocuments,
-      })
-      if (error) throw error
-      setMessage('Staff application submitted. Your account will remain pending until the college reviews it.')
-      await onSubmitted()
-    } catch (error) {
-      let cleanupMessage = ''
-      if (uploaded.length) {
-        const cleanup = await supabase.storage.from(bucket).remove(uploaded)
-        if (cleanup.error) cleanupMessage = ` Uploaded files need cleanup: ${cleanup.error.message}`
-      }
-      showError(`${error instanceof Error ? error.message : 'Staff application could not be submitted.'}${cleanupMessage}`)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  function showError(text: string) {
-    setIsError(true)
-    setMessage(text)
-  }
-
-  if (loadError) return <FormMessage error message={`Could not load active departments: ${loadError}`} />
-
-  return (
-    <form className="space-y-5" onSubmit={submit}>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Application type" required>
-          <select className="form-input" value={form.staffType} onChange={(e) => setForm({ ...form, staffType: e.target.value })}>
-            <option value="lecturer">Lecturer / instructor</option>
-            <option value="non_teaching_staff">Non-teaching staff</option>
-          </select>
-        </Field>
-        <Field label="Full legal name" required>
-          <input className="form-input" autoComplete="name" maxLength={120} required value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} />
-        </Field>
-        <Field label="Phone number" required>
-          <input className="form-input" autoComplete="tel" maxLength={30} required type="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
-        </Field>
-        <Field label="Department" required>
-          <select className="form-input" required value={form.departmentId} onChange={(e) => setForm({ ...form, departmentId: e.target.value })}>
-            <option value="">Choose an active department</option>
-            {departments.map((department) => <option key={department.id} value={department.id}>{department.code} — {department.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Job title" required>
-          <input className="form-input" maxLength={120} required value={form.jobTitle} onChange={(e) => setForm({ ...form, jobTitle: e.target.value })} />
-        </Field>
-        <Field label="Highest qualification" required>
-          <input className="form-input" maxLength={160} required value={form.qualification} onChange={(e) => setForm({ ...form, qualification: e.target.value })} />
-        </Field>
-        <Field label="Years of experience" required>
-          <input className="form-input" max="60" min="0" required type="number" value={form.experience} onChange={(e) => setForm({ ...form, experience: e.target.value })} />
-        </Field>
-      </div>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <FileField label="Profile photo" accept="image/jpeg,image/png,image/webp" file={photo} onChange={setPhoto} required hint="JPEG, PNG, WebP · up to 10 MB" />
-        <FileField label="CV / résumé" accept=".pdf,image/jpeg,image/png,image/webp" file={cv} onChange={setCv} required hint="PDF or image · up to 10 MB" />
-        <label className="block sm:col-span-2">
-          <span className="mb-2 block text-xs font-semibold">Qualification documents <span className="font-normal text-slate-500">(optional, up to 7)</span></span>
-          <span className="flex min-h-12 items-center gap-3 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-800/50">
-            <FileText className="shrink-0 text-slate-400" size={17} />
-            <span className="min-w-0 flex-1 truncate text-xs">{qualifications.length ? `${qualifications.length} file(s) selected` : 'Choose files'}</span>
-            <input accept=".pdf,image/jpeg,image/png,image/webp" className="sr-only" multiple onChange={(e) => setQualifications(Array.from(e.target.files ?? []))} type="file" />
-          </span>
-        </label>
-      </div>
-      <FormMessage error={isError} message={message} />
-      <button className="primary-button h-11 w-full justify-center sm:w-auto" disabled={busy || departments.length === 0} type="submit">
-        {busy ? <><LoaderCircle className="animate-spin" size={16} /> Uploading application…</> : 'Submit staff application'}
-      </button>
-      {departments.length === 0 && <p className="text-xs text-slate-500">Applications open when the college adds active departments.</p>}
+      {offerings.length === 0 && <p className="text-xs text-slate-500">Applications open when the registrar marks course offerings available.</p>}
     </form>
   )
 }
@@ -991,7 +819,15 @@ type StudentApplication = {
   photo_path: string
   study_year: number | null
   submitted_at: string
-  programme?: { code: string; name: string; duration_years: number | null } | null
+  programme?: { id: string; code: string; name: string; duration_years: number | null } | null
+  course_choices?: Array<{
+    offering: Related<{
+      academic_year: string
+      term: number
+      section: string
+      course: Related<{ code: string; name: string }>
+    }>
+  }>
   documents?: ApplicationDocument[]
   photoUrl?: string
   documentUrls?: Record<string, string>
@@ -1018,8 +854,9 @@ export function RegistrationReviewPage() {
   const [staff, setStaff] = useState<StaffApplication[]>([])
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState('')
-  const [savingStudyYearId, setSavingStudyYearId] = useState('')
-  const [studyYearDrafts, setStudyYearDrafts] = useState<Record<string, string>>({})
+  const [savingPlacementId, setSavingPlacementId] = useState('')
+  const [placementDrafts, setPlacementDrafts] = useState<Record<string, { programmeId: string; studyYear: string }>>({})
+  const [programmes, setProgrammes] = useState<Programme[]>([])
   const [message, setMessage] = useState('')
   const [isError, setIsError] = useState(false)
 
@@ -1027,10 +864,10 @@ export function RegistrationReviewPage() {
     const client = supabase
     if (!client) return
     setLoading(true)
-    const [studentResult, staffResult] = await Promise.all([
+    const [studentResult, staffResult, programmeResult] = await Promise.all([
       client
         .from('college_student_applications')
-        .select('*, programme:college_programmes(code,name,duration_years), documents:college_student_application_documents(id,document_type,original_name,storage_path)')
+        .select('*, programme:college_programmes(id,code,name,duration_years), course_choices:college_student_application_course_choices(offering:college_course_offerings(academic_year,term,section,course:college_courses(code,name))), documents:college_student_application_documents(id,document_type,original_name,storage_path)')
         .eq('application_status', 'pending')
         .order('submitted_at'),
       client
@@ -1038,8 +875,9 @@ export function RegistrationReviewPage() {
         .select('*, department:college_departments(name), documents:college_staff_application_documents(id,document_type,original_name,storage_path)')
         .eq('application_status', 'pending')
         .order('submitted_at'),
+      client.from('college_programmes').select('id,code,name,duration_years').eq('is_active', true).order('name'),
     ])
-    const error = studentResult.error ?? staffResult.error
+    const error = studentResult.error ?? staffResult.error ?? programmeResult.error
     if (error) {
       setIsError(true)
       setMessage(error.message)
@@ -1068,6 +906,7 @@ export function RegistrationReviewPage() {
       })))
       setStudents(signedStudents as StudentApplication[])
       setStaff(signedStaff as StaffApplication[])
+      setProgrammes(programmeResult.data ?? [])
       setIsError(false)
       setMessage('')
     } catch (error) {
@@ -1086,48 +925,67 @@ export function RegistrationReviewPage() {
     if (!supabase) return
     setBusyId(id)
     setMessage('')
-    const rpc = kind === 'student'
-      ? 'approve_college_student_application'
-      : 'approve_college_staff_application'
-    const { data, error } = await supabase.rpc(rpc, { p_application_id: id })
-    setBusyId('')
-    if (error) {
+    const application = students.find((item) => item.id === id)
+    const draft = application ? placementDrafts[id] : undefined
+    const programmeId = draft?.programmeId || application?.programme?.id || ''
+    const studyYear = Number(draft?.studyYear || application?.study_year || 0)
+    if (kind === 'student' && (!programmeId || !Number.isInteger(studyYear) || studyYear < 1)) {
+      setBusyId('')
       setIsError(true)
-      setMessage(error.message)
+      setMessage('Assign a programme and valid year of study before approving this student.')
+      return
+    }
+    const result = kind === 'student'
+      ? await supabase.rpc('approve_college_student_application_with_courses', {
+        p_application_id: id,
+        p_programme_id: programmeId,
+        p_study_year: studyYear,
+      })
+      : await supabase.rpc('approve_college_staff_application', { p_application_id: id })
+    setBusyId('')
+    if (result.error) {
+      setIsError(true)
+      setMessage(result.error.message)
       return
     }
     setIsError(false)
-    setMessage(`${kind === 'student' ? 'Student admission' : 'Staff registration'} approved. Assigned ID: ${data}`)
+    setMessage(`${kind === 'student' ? 'Student admission and requested course enrolments' : 'Legacy staff registration'} approved. Assigned ID: ${result.data}`)
     await loadApplications()
   }
 
-  async function saveApplicationStudyYear(application: StudentApplication) {
+  async function saveApplicationPlacement(application: StudentApplication) {
     if (!supabase) return
-    const studyYear = Number(studyYearDrafts[application.id])
-    if (!Number.isInteger(studyYear) || studyYear < 1) {
+    const draft = placementDrafts[application.id] ?? {
+      programmeId: application.programme?.id ?? '',
+      studyYear: application.study_year?.toString() ?? '',
+    }
+    const studyYear = Number(draft?.studyYear)
+    if (!draft?.programmeId || !Number.isInteger(studyYear) || studyYear < 1) {
       setIsError(true)
-      setMessage('Enter a valid year of study.')
+      setMessage('Choose a programme and enter a valid year of study.')
       return
     }
 
-    setSavingStudyYearId(application.id)
+    setSavingPlacementId(application.id)
     setMessage('')
-    const { error } = await supabase.rpc('set_college_student_application_study_year', {
+    const { error } = await supabase.rpc('set_college_student_application_placement', {
       p_application_id: application.id,
+      p_programme_id: draft.programmeId,
       p_study_year: studyYear,
     })
-    setSavingStudyYearId('')
+    setSavingPlacementId('')
     if (error) {
       setIsError(true)
       setMessage(error.message)
       return
     }
 
-    setStudents((current) => current.map((item) =>
-      item.id === application.id ? { ...item, study_year: studyYear } : item,
-    ))
+    const programme = programmes.find((item) => item.id === draft.programmeId)
+    setStudents((current) => current.map((item) => item.id === application.id
+      ? { ...item, study_year: studyYear, programme: programme ?? item.programme }
+      : item))
     setIsError(false)
-    setMessage(`Year ${studyYear} saved for ${application.full_name}.`)
+    setMessage(`Programme and year saved for ${application.full_name}.`)
   }
 
   return (
@@ -1136,7 +994,7 @@ export function RegistrationReviewPage() {
         <div>
           <p className="text-xs font-medium text-slate-500">Registrar workspace</p>
           <h2 className="mt-1 text-2xl font-bold tracking-tight">Registration review</h2>
-          <p className="mt-2 text-sm text-slate-500">Review private applicant details and documents before assigning a college role.</p>
+          <p className="mt-2 text-sm text-slate-500">Review student details, assign programme and year, confirm requested courses, and approve admission.</p>
         </div>
         <button className="secondary-button w-fit" onClick={() => void loadApplications()}><RefreshCw size={14} /> Refresh</button>
       </div>
@@ -1144,54 +1002,73 @@ export function RegistrationReviewPage() {
       {loading ? <LoadingCard label="Loading applications…" /> : (
         <div className="mt-5 space-y-4">
           {!students.length && !staff.length && <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900">No applications awaiting review.</div>}
-          {students.map((application) => (
-            <ApplicationCard
+          {students.map((application) => {
+            const draft = placementDrafts[application.id] ?? {
+              programmeId: application.programme?.id ?? '',
+              studyYear: application.study_year?.toString() ?? '',
+            }
+            const programme = programmes.find((item) => item.id === draft.programmeId)
+            const choices = (application.course_choices ?? []).map((choice) => {
+              const offering = relationValue(choice.offering)
+              const course = relationValue(offering?.course)
+              return course
+                ? `${course.code} · ${course.name} · ${offering?.academic_year ?? ''} · Term ${offering?.term ?? ''} · ${offering?.section ?? ''}`
+                : ''
+            }).filter(Boolean)
+            const canApprove = Boolean(draft.programmeId && Number.isInteger(Number(draft.studyYear)) && Number(draft.studyYear) > 0)
+            return <ApplicationCard
               key={application.id}
               title="Student admission"
               name={application.full_name}
-              subtitle={`${application.programme?.code ?? ''} ${application.programme?.name ?? ''}`}
+              subtitle={application.programme ? `${application.programme.code} ${application.programme.name}` : 'Programme not assigned'}
               phone={application.phone}
               photoUrl={application.photoUrl}
               documents={application.documents ?? []}
               documentUrls={application.documentUrls ?? {}}
               submittedAt={application.submitted_at}
               busy={busyId === application.id}
-              canApprove={application.study_year !== null}
-              extra={application.study_year === null ? (
+              canApprove={canApprove}
+              extra={
                 <form
-                  className="mt-4 flex flex-wrap items-end gap-3 border-t border-slate-100 pt-4 dark:border-slate-800"
+                  className="mt-4 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-[minmax(0,1fr)_160px_auto] sm:items-end dark:border-slate-800"
                   onSubmit={(event) => {
                     event.preventDefault()
-                    void saveApplicationStudyYear(application)
+                    void saveApplicationPlacement(application)
                   }}
                 >
                   <label className="block text-[11px] font-semibold">
-                    Year of study
-                    <input
-                      className="form-input mt-1 w-32"
-                      max={application.programme?.duration_years ?? undefined}
-                      min="1"
-                      onChange={(event) => setStudyYearDrafts({ ...studyYearDrafts, [application.id]: event.target.value })}
-                      required
-                      type="number"
-                      value={studyYearDrafts[application.id] ?? ''}
-                    />
+                    Assign programme
+                    <select className="form-input mt-1" onChange={(event) => setPlacementDrafts({
+                      ...placementDrafts,
+                      [application.id]: { ...draft, programmeId: event.target.value, studyYear: '' },
+                    })} required value={draft.programmeId}>
+                      <option value="">Choose programme</option>
+                      {programmes.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}
+                    </select>
                   </label>
-                  <button className="secondary-button h-10 justify-center" disabled={savingStudyYearId === application.id} type="submit">
-                    {savingStudyYearId === application.id ? 'Saving…' : 'Save year'}
+                  <label className="block text-[11px] font-semibold">
+                    Year of study
+                    <input className="form-input mt-1" max={programme?.duration_years ?? undefined} min="1" onChange={(event) => setPlacementDrafts({
+                      ...placementDrafts,
+                      [application.id]: { ...draft, studyYear: event.target.value },
+                    })} required type="number" value={draft.studyYear} />
+                  </label>
+                  <button className="secondary-button h-10 justify-center" disabled={savingPlacementId === application.id} type="submit">
+                    {savingPlacementId === application.id ? 'Saving…' : 'Save placement'}
                   </button>
                 </form>
-              ) : null}
+              }
               onApprove={() => void approve('student', application.id)}
               details={[
-                ['Year of study', application.study_year === null ? 'Set before approval' : `Year ${application.study_year}`],
+                ['Requested course offerings', choices.join(' | ') || 'None selected'],
+                ['Year of study', draft.studyYear ? `Year ${draft.studyYear}` : 'Set before approval'],
                 ['Date of birth', application.date_of_birth],
                 ['Gender', application.gender.replaceAll('_', ' ')],
                 ['Home address', application.home_address],
                 ['Emergency contact', `${application.emergency_contact_name} · ${application.emergency_contact_phone}`],
               ]}
             />
-          ))}
+          })}
           {staff.map((application) => (
             <ApplicationCard
               key={application.id}
@@ -1260,7 +1137,7 @@ function ApplicationCard({
         </div>
         <button className="primary-button h-10 justify-center self-start" disabled={busy || !canApprove} onClick={onApprove} type="button">
           {busy ? <LoaderCircle className="animate-spin" size={15} /> : <CheckCircle2 size={15} />}
-          {busy ? 'Approving…' : canApprove ? 'Approve' : 'Set year first'}
+          {busy ? 'Approving…' : canApprove ? 'Approve and enrol' : 'Complete placement first'}
         </button>
       </div>
       <dl className="mt-4 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-2 dark:border-slate-800">
@@ -1483,46 +1360,110 @@ export function StudentsPage({ canManage }: { canManage: boolean }) {
 
 export function StaffPage() {
   const [staff, setStaff] = useState<StaffDirectoryEntry[]>([])
+  const [departments, setDepartments] = useState<Department[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [form, setForm] = useState({ email: '', fullName: '', phone: '', staffType: 'lecturer', departmentId: '', jobTitle: '' })
+
+  const loadStaff = useCallback(async (isActive: () => boolean = () => true) => {
+    const client = supabase
+    if (!client) {
+      if (isActive()) {
+        setError('Supabase is not configured.')
+        setLoading(false)
+      }
+      return
+    }
+    setLoading(true)
+    const [staffResult, departmentResult] = await Promise.all([
+      client
+        .from('college_staff')
+        .select('id,staff_number,job_title,employment_status,phone,photo_path,profile:college_profiles!college_staff_id_fkey(full_name,email,role),department:college_departments(name)')
+        .order('staff_number'),
+      client.from('college_departments').select('id,code,name,is_active').eq('is_active', true).order('name'),
+    ])
+    const queryError = staffResult.error ?? departmentResult.error
+    if (queryError) {
+      if (isActive()) {
+        setError(queryError.message)
+        setLoading(false)
+      }
+      return
+    }
+    try {
+      const records = (staffResult.data ?? []) as StaffDirectoryEntry[]
+      const rows = await Promise.all(records.map(async (row) => {
+        if (!row.photo_path) return row
+        const { data: photo, error: signedError } = await client.storage.from(bucket).createSignedUrl(row.photo_path, 300)
+        if (signedError) throw signedError
+        return { ...row, photoUrl: photo.signedUrl }
+      }))
+      if (isActive()) {
+        setStaff(rows)
+        setDepartments(departmentResult.data ?? [])
+        setError('')
+      }
+    } catch (caught) {
+      if (isActive()) setError(caught instanceof Error ? caught.message : 'Could not load staff photos.')
+    } finally {
+      if (isActive()) setLoading(false)
+    }
+  }, [])
 
   useEffect(() => {
     let active = true
-    async function load() {
-      const client = supabase
-      if (!client) return
-      const { data, error: queryError } = await client
-        .from('college_staff')
-        .select('id,staff_number,job_title,employment_status,phone,photo_path,profile:college_profiles!college_staff_id_fkey(full_name,email,role),department:college_departments(name)')
-        .order('staff_number')
-      if (!active) return
-      if (queryError) {
-        setError(queryError.message)
-      } else {
-        try {
-          const records = (data ?? []) as StaffDirectoryEntry[]
-          const rows = await Promise.all(records.map(async (row) => {
-            if (!row.photo_path) return row
-            const { data: photo, error: signedError } = await client.storage.from(bucket).createSignedUrl(row.photo_path, 300)
-            if (signedError) throw signedError
-            return { ...row, photoUrl: photo.signedUrl }
-          }))
-          if (active) setStaff(rows)
-        } catch (error) {
-          if (active) setError(error instanceof Error ? error.message : 'Could not load staff photos.')
-        }
-      }
-      if (active) setLoading(false)
-    }
-    void load()
+    void loadStaff(() => active)
     return () => { active = false }
-  }, [])
+  }, [loadStaff])
+
+  async function createStaffAccount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!supabase) {
+      setError('Supabase is not configured.')
+      return
+    }
+    setBusy(true)
+    setError('')
+    setSuccess('')
+    const { data, error: inviteError } = await supabase.functions.invoke<{ staff_number: string }>('create-staff-account', {
+      body: {
+        email: form.email.trim(),
+        full_name: form.fullName.trim(),
+        phone: form.phone.trim(),
+        staff_type: form.staffType,
+        department_id: form.departmentId,
+        job_title: form.jobTitle.trim(),
+      },
+    })
+    setBusy(false)
+    if (inviteError) {
+      setError(inviteError.message)
+      return
+    }
+    setSuccess(`Invitation sent. Staff number: ${data?.staff_number ?? 'assigned'}. The staff member will set their own password from the email link.`)
+    setForm({ email: '', fullName: '', phone: '', staffType: 'lecturer', departmentId: '', jobTitle: '' })
+    await loadStaff()
+  }
 
   return (
     <div className="mx-auto max-w-5xl">
       <h2 className="text-2xl font-bold tracking-tight">Staff</h2>
-      <p className="mt-2 text-sm text-slate-500">Approved lecturers and non-teaching staff.</p>
+      <p className="mt-2 text-sm text-slate-500">Administrator-managed lecturer and non-teaching staff accounts.</p>
       {error && <div className="mt-5"><FormMessage error message={error} /></div>}
+      {success && <div className="mt-5"><FormMessage message={success} /></div>}
+      <form className="mt-6 grid gap-3 rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:grid-cols-2 lg:grid-cols-3" onSubmit={createStaffAccount}>
+        <h3 className="text-sm font-bold sm:col-span-2 lg:col-span-3">Create staff account and send secure invite</h3>
+        <Field label="Full name" required><input className="form-input" maxLength={120} onChange={(event) => setForm({ ...form, fullName: event.target.value })} required value={form.fullName} /></Field>
+        <Field label="Email address" required><input className="form-input" onChange={(event) => setForm({ ...form, email: event.target.value })} required type="email" value={form.email} /></Field>
+        <Field label="Phone number" required><input className="form-input" maxLength={30} onChange={(event) => setForm({ ...form, phone: event.target.value })} required type="tel" value={form.phone} /></Field>
+        <Field label="Staff type" required><select className="form-input" onChange={(event) => setForm({ ...form, staffType: event.target.value })} value={form.staffType}><option value="lecturer">Lecturer</option><option value="non_teaching_staff">Non-teaching staff</option></select></Field>
+        <Field label="Department" required><select className="form-input" onChange={(event) => setForm({ ...form, departmentId: event.target.value })} required value={form.departmentId}><option value="">Choose department</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.code} · {department.name}</option>)}</select></Field>
+        <Field label="Job title" required><input className="form-input" maxLength={120} onChange={(event) => setForm({ ...form, jobTitle: event.target.value })} required value={form.jobTitle} /></Field>
+        <button className="primary-button sm:col-span-2 lg:col-span-3" disabled={busy || !departments.length} type="submit">{busy ? 'Sending secure invite…' : 'Create staff account'}</button>
+        <p className="text-[11px] leading-5 text-slate-500 sm:col-span-2 lg:col-span-3">No password is created or shown here. Supabase sends a one-time email invitation so the staff member can set their own password.</p>
+      </form>
       <section className="mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
         {loading ? <LoadingCard label="Loading staff records…" /> : staff.length ? (
           <div className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -1541,7 +1482,7 @@ export function StaffPage() {
               )
             })}
           </div>
-        ) : <p className="p-8 text-center text-sm text-slate-500">No approved staff yet. Use Registration review to process applications.</p>}
+        ) : <p className="p-8 text-center text-sm text-slate-500">No staff accounts have been created yet. Use the invite form above to add staff.</p>}
       </section>
     </div>
   )

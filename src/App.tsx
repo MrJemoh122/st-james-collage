@@ -79,7 +79,7 @@ const moduleAccess: Record<CollegeRole, string[]> = {
   academic_registrar: modules.map((module) => module.name),
   department_head: ['Overview', 'Programmes', 'Academics', 'Examinations', 'Timetable', 'Reports'],
   lecturer: ['Overview', 'Academics', 'Attendance', 'Examinations', 'Timetable'],
-  student: ['Overview', 'Academics', 'Attendance', 'Finance', 'Library', 'Timetable'],
+  student: ['Overview', 'Academics', 'Attendance', 'Examinations', 'Finance', 'Library', 'Timetable'],
   finance_accountant: ['Overview', 'Finance', 'Reports'],
   bursar: ['Overview', 'Finance', 'Reports'],
   librarian: ['Overview', 'Library'],
@@ -860,7 +860,7 @@ function StudentOverview({
             .eq('student_id', userId)
             .eq('enrollment_status', 'enrolled'),
         ])
-        if (studentResult.error) throw studentResult.error
+        if (studentResult.error) throw new Error(`Student profile: ${errorMessage(studentResult.error)}`)
         if (!studentResult.data) throw new Error('No approved student record was found for this account.')
         const profileRow = studentResult.data as typeof studentProfile
         if (profileRow?.photo_path && supabase) {
@@ -873,7 +873,7 @@ function StudentOverview({
         if (active) setStudentProfile(profileRow)
         const enrollmentRows = enrollmentResult.data
         const enrollmentError = enrollmentResult.error
-        if (enrollmentError) throw enrollmentError
+        if (enrollmentError) throw new Error(`Course enrolments: ${errorMessage(enrollmentError)}`)
 
         const offeringIds = (enrollmentRows ?? []).map((row) => row.course_offering_id)
         const courseRows = (enrollmentRows ?? []).map((row) => {
@@ -896,15 +896,18 @@ function StudentOverview({
           supabase.from('college_fee_charges').select('amount').eq('student_id', userId),
           supabase.from('college_payments').select('amount,payment_status').eq('student_id', userId),
         ])
-        for (const result of [slotResult, examResult, resultResult, sessionResult, chargeResult, paymentResult]) {
-          if (result.error) throw result.error
-        }
+        if (slotResult.error) throw new Error(`Timetable: ${errorMessage(slotResult.error)}`)
+        if (examResult.error) throw new Error(`Upcoming examinations: ${errorMessage(examResult.error)}`)
+        if (resultResult.error) throw new Error(`Published results: ${errorMessage(resultResult.error)}`)
+        if (sessionResult.error) throw new Error(`Attendance sessions: ${errorMessage(sessionResult.error)}`)
+        if (chargeResult.error) throw new Error(`Fee charges: ${errorMessage(chargeResult.error)}`)
+        if (paymentResult.error) throw new Error(`Payments: ${errorMessage(paymentResult.error)}`)
 
         const sessionIds = (sessionResult.data ?? []).map((session) => session.id)
         const attendanceResult = sessionIds.length
           ? await supabase.from('college_attendance_records').select('session_id,attendance_status').eq('student_id', userId).in('session_id', sessionIds)
           : { data: [], error: null }
-        if (attendanceResult.error) throw attendanceResult.error
+        if (attendanceResult.error) throw new Error(`Attendance: ${errorMessage(attendanceResult.error)}`)
 
         const visibleSubjects = courseRows
         const visibleSlots = ((slotResult.data ?? []) as Array<{ day_of_week: number; starts_at: string; ends_at: string; room: string | null; offering: { course: { code: string; name: string } | Array<{ code: string; name: string }> | null } | Array<{ course: { code: string; name: string } | Array<{ code: string; name: string }> | null }> | null }>).map((slot) => {
@@ -964,22 +967,21 @@ function StudentOverview({
       </header>
       {error && <p aria-live="polite" className="mt-5 rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">{error}</p>}
       {studentProfile && (
-        <div className="mt-5 flex flex-col gap-4 rounded-2xl border border-indigo-100 bg-indigo-50/70 px-4 py-4 sm:flex-row sm:items-center dark:border-indigo-900/70 dark:bg-indigo-950/30">
-          {studentProfile.photoUrl
-            ? <img alt={studentIdentity?.full_name ?? 'Student profile'} className="h-20 w-20 rounded-2xl object-cover" src={studentProfile.photoUrl} />
-            : <span className="grid h-20 w-20 place-items-center rounded-2xl bg-white text-lg font-bold text-indigo-600 shadow-sm dark:bg-slate-900">{(studentIdentity?.full_name?.[0] ?? studentProfile.student_number[0] ?? 'S').toUpperCase()}</span>}
-          <div className="min-w-0">
+        <div className="mt-5 grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <section aria-label="Student account" className="rounded-2xl border border-indigo-100 bg-indigo-50/70 px-4 py-4 dark:border-indigo-900/70 dark:bg-indigo-950/30">
             <p className="text-lg font-bold">{studentIdentity?.full_name ?? 'Student profile'}</p>
             <p className="mt-1 text-xs font-semibold text-indigo-700 dark:text-indigo-300">{studentProfile.student_number} · {studentProfile.student_status.replaceAll('_', ' ')}</p>
             <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">
               {studentProgramme ? `${studentProgramme.code} · ${studentProgramme.name}` : 'Programme not set'} · {studentProfile.study_year ? `Year ${studentProfile.study_year}` : 'Study year not set'}
             </p>
-          </div>
-          {subjects.length === 0 && (
-            <p className="mt-2 text-slate-600 dark:text-slate-400">
-              No course offerings are linked yet. Ask the registrar to assign your study year and map the programme year to the current offerings.
-            </p>
-          )}
+            {subjects.length === 0 && <p className="mt-3 text-xs text-slate-600 dark:text-slate-400">No course offerings are linked yet. Ask the registrar to assign your study year and map the programme year to current offerings.</p>}
+          </section>
+          <section aria-label="Student profile photo" className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900 sm:w-56 sm:flex-col sm:justify-center sm:p-4">
+            {studentProfile.photoUrl
+              ? <img alt={`${studentIdentity?.full_name ?? 'Student'} profile`} className="h-20 w-20 rounded-xl object-cover" src={studentProfile.photoUrl} />
+              : <span className="grid h-20 w-20 place-items-center rounded-xl bg-indigo-50 text-lg font-bold text-indigo-600 dark:bg-indigo-950/50 dark:text-indigo-300">{(studentIdentity?.full_name?.[0] ?? studentProfile.student_number[0] ?? 'S').toUpperCase()}</span>}
+            <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">Profile photo</p>
+          </section>
         </div>
       )}
       {loading ? <div className="grid min-h-64 place-items-center text-sm text-slate-500"><span className="flex items-center gap-2"><span className="loading-dot" />Loading your records…</span></div> : (

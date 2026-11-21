@@ -16,6 +16,7 @@ type Offering = {
   term: number
   section: string
   lecturer_id: string | null
+  student_selection_open?: boolean
   course: Related<Pick<Course, 'id' | 'code' | 'name' | 'department_id'> & {
     department?: Related<Pick<Department, 'code' | 'name'>>
   }>
@@ -238,7 +239,7 @@ export function AcademicsPage({ role, userId }: Props) {
       const [departmentResult, courseResult, offeringResult, enrollmentResult, programmeResult, mappingResult] = await Promise.all([
         supabase.from('college_departments').select('id,code,name').eq('is_active', true).order('name'),
         supabase.from('college_courses').select('id,code,name,department_id,credit_hours,is_active').order('code'),
-        supabase.from('college_course_offerings').select('id,academic_year,term,section,lecturer_id,course:college_courses(id,code,name,department_id)').order('academic_year', { ascending: false }),
+        supabase.from('college_course_offerings').select('id,academic_year,term,section,lecturer_id,student_selection_open,course:college_courses(id,code,name,department_id)').order('academic_year', { ascending: false }),
         role === 'student'
           ? supabase.from('college_enrollments').select('course_offering_id').eq('student_id', userId).eq('enrollment_status', 'enrolled')
           : Promise.resolve({ data: [], error: null }),
@@ -356,6 +357,19 @@ export function AcademicsPage({ role, userId }: Props) {
     await load()
   }
 
+  async function toggleStudentSelection(offering: Offering) {
+    if (!supabase || !canManage) return
+    setBusy(true); setError(''); setSuccess('')
+    const nextState = !offering.student_selection_open
+    const { error: updateError } = await supabase.from('college_course_offerings')
+      .update({ student_selection_open: nextState })
+      .eq('id', offering.id)
+    setBusy(false)
+    if (updateError) { setError(messageOf(updateError)); return }
+    setSuccess(`Student applications ${nextState ? 'opened' : 'closed'} for ${related(offering.course)?.code ?? 'this course offering'}.`)
+    await load()
+  }
+
   return (
     <PageFrame title="Academics" description="Manage subjects, course offerings and academic delivery." actions={<button className="secondary-button" onClick={() => void load()} type="button"><RefreshCw size={14} /> Refresh</button>}>
       <Notice error={error} success={success} />
@@ -410,7 +424,7 @@ export function AcademicsPage({ role, userId }: Props) {
             {courses.length ? <Table headers={['Code', 'Subject', 'Department', 'Credits', 'Status', ...(canManage ? ['Action'] : [])]}>{courses.map((course) => <Row key={course.id}><Cell>{course.code}</Cell><Cell>{course.name}</Cell><Cell>{departments.find((department) => department.id === course.department_id)?.code ?? '—'}</Cell><Cell>{course.credit_hours}</Cell><Cell>{course.is_active ? 'Active' : 'Inactive'}</Cell>{canManage && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void toggleCourse(course)} type="button">{course.is_active ? 'Deactivate' : 'Activate'}</button></Cell>}</Row>)}</Table> : <Empty>No subjects are recorded.</Empty>}
           </Panel>
           <Panel title={`Course offerings (${offerings.length})`}>
-            {offerings.length ? <Table headers={['Subject', 'Academic year', 'Term', 'Section', 'Lecturer']}>{offerings.map((offering) => <Row key={offering.id}><Cell>{related(offering.course)?.code ?? '—'} · {related(offering.course)?.name ?? ''}</Cell><Cell>{offering.academic_year}</Cell><Cell>{offering.term}</Cell><Cell>{offering.section}</Cell><Cell>{offering.lecturer_id ? staff.find((member) => member.id === offering.lecturer_id)?.staff_number ?? 'Assigned' : 'Unassigned'}</Cell></Row>)}</Table> : <Empty>No course offerings are recorded.</Empty>}
+            {offerings.length ? <Table headers={['Subject', 'Academic year', 'Term', 'Section', 'Lecturer', ...(canManage ? ['Applications'] : [])]}>{offerings.map((offering) => <Row key={offering.id}><Cell>{related(offering.course)?.code ?? '—'} · {related(offering.course)?.name ?? ''}</Cell><Cell>{offering.academic_year}</Cell><Cell>{offering.term}</Cell><Cell>{offering.section}</Cell><Cell>{offering.lecturer_id ? staff.find((member) => member.id === offering.lecturer_id)?.staff_number ?? 'Assigned' : 'Unassigned'}</Cell>{canManage && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void toggleStudentSelection(offering)} type="button">{offering.student_selection_open ? 'Close selection' : 'Open selection'}</button></Cell>}</Row>)}</Table> : <Empty>No course offerings are recorded.</Empty>}
           </Panel>
         </div>
       )}
