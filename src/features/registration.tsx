@@ -507,7 +507,7 @@ export function DepartmentsPage({ canManage }: { canManage: boolean }) {
   const [isError, setIsError] = useState(false)
 
   const loadDepartments = useCallback(async () => {
-    if (!supabase) return
+    if (!supabase) return false
     setLoading(true)
     const { data, error } = await supabase
       .from('college_departments')
@@ -516,11 +516,14 @@ export function DepartmentsPage({ canManage }: { canManage: boolean }) {
     if (error) {
       setIsError(true)
       setMessage(error.message)
+      setLoading(false)
+      return false
     } else {
       setDepartments(data ?? [])
       setMessage('')
     }
     setLoading(false)
+    return true
   }, [])
 
   useEffect(() => {
@@ -529,24 +532,50 @@ export function DepartmentsPage({ canManage }: { canManage: boolean }) {
 
   async function addDepartment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!supabase) return
-    setBusy(true)
-    setMessage('')
-    const { error } = await supabase.from('college_departments').insert({
-      code: code.trim().toUpperCase(),
-      name: name.trim(),
-    })
-    setBusy(false)
-    if (error) {
+    const departmentCode = code.trim().toUpperCase()
+    const departmentName = name.trim()
+    if (!departmentCode || !departmentName) {
       setIsError(true)
-      setMessage(error.message)
+      setMessage('Enter both a department code and department name.')
       return
     }
-    setIsError(false)
-    setMessage('Department created.')
-    setCode('')
-    setName('')
-    await loadDepartments()
+    if (!supabase) {
+      setIsError(true)
+      setMessage('Supabase is not configured.')
+      return
+    }
+    setBusy(true)
+    setMessage('')
+    try {
+      const { error } = await supabase.from('college_departments').insert({
+        code: departmentCode,
+        name: departmentName,
+      })
+      if (error) {
+        setIsError(true)
+        setMessage(error.code === '23505'
+          ? 'A department with that code or name already exists. Choose a unique code and name.'
+          : error.code === '42501'
+            ? `Your account is not permitted to create departments. ${error.message}`
+            : error.message)
+        return
+      }
+      setCode('')
+      setName('')
+      if (await loadDepartments()) {
+        setIsError(false)
+        setMessage('Department created.')
+      }
+    } catch (caught) {
+      setIsError(true)
+      setMessage(caught instanceof Error
+        ? caught.message
+        : caught && typeof caught === 'object' && 'message' in caught && typeof caught.message === 'string'
+          ? caught.message
+          : 'The department could not be created. Check your connection and try again.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function toggleActive(department: Department) {
