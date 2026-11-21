@@ -819,6 +819,9 @@ function StudentOverview({
     student_number: string
     student_status: string
     study_year: number | null
+    photo_path: string | null
+    photoUrl: string | null
+    profile: { full_name: string; email: string | null } | Array<{ full_name: string; email: string | null }> | null
     programme: { code: string; name: string } | Array<{ code: string; name: string }> | null
   } | null>(null)
 
@@ -836,7 +839,7 @@ function StudentOverview({
         const [studentResult, enrollmentResult] = await Promise.all([
           supabase
             .from('college_students')
-            .select('student_number,student_status,study_year,programme:college_programmes(code,name)')
+            .select('student_number,student_status,study_year,photo_path,profile:college_profiles(full_name,email),programme:college_programmes(code,name)')
             .eq('id', userId)
             .maybeSingle(),
           supabase
@@ -847,7 +850,15 @@ function StudentOverview({
         ])
         if (studentResult.error) throw studentResult.error
         if (!studentResult.data) throw new Error('No approved student record was found for this account.')
-        if (active) setStudentProfile(studentResult.data as typeof studentProfile)
+        const profileRow = studentResult.data as typeof studentProfile
+        if (profileRow?.photo_path && supabase) {
+          const bucket = 'college-registrations'
+          const { data: photo } = await supabase.storage.from(bucket).createSignedUrl(profileRow.photo_path, 300)
+          profileRow.photoUrl = photo?.signedUrl ?? null
+        } else if (profileRow) {
+          profileRow.photoUrl = null
+        }
+        if (active) setStudentProfile(profileRow)
         const enrollmentRows = enrollmentResult.data
         const enrollmentError = enrollmentResult.error
         if (enrollmentError) throw enrollmentError
@@ -925,6 +936,9 @@ function StudentOverview({
   const studentProgramme = studentProfile
     ? Array.isArray(studentProfile.programme) ? studentProfile.programme[0] : studentProfile.programme
     : null
+  const studentIdentity = studentProfile
+    ? Array.isArray(studentProfile.profile) ? studentProfile.profile[0] : studentProfile.profile
+    : null
 
   return (
     <div>
@@ -938,11 +952,17 @@ function StudentOverview({
       </header>
       {error && <p aria-live="polite" className="mt-5 rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">{error}</p>}
       {studentProfile && (
-        <div className="mt-5 rounded-xl border border-indigo-100 bg-indigo-50/70 px-4 py-3 text-xs dark:border-indigo-900/70 dark:bg-indigo-950/30">
-          <p className="font-semibold">{studentProfile.student_number} · {studentProfile.student_status.replaceAll('_', ' ')}</p>
-          <p className="mt-1 text-slate-600 dark:text-slate-400">
-            {studentProgramme ? `${studentProgramme.code} · ${studentProgramme.name}` : 'Programme not set'} · {studentProfile.study_year ? `Year ${studentProfile.study_year}` : 'Study year not set'}
-          </p>
+        <div className="mt-5 flex flex-col gap-4 rounded-2xl border border-indigo-100 bg-indigo-50/70 px-4 py-4 sm:flex-row sm:items-center dark:border-indigo-900/70 dark:bg-indigo-950/30">
+          {studentProfile.photoUrl
+            ? <img alt={studentIdentity?.full_name ?? 'Student profile'} className="h-20 w-20 rounded-2xl object-cover" src={studentProfile.photoUrl} />
+            : <span className="grid h-20 w-20 place-items-center rounded-2xl bg-white text-lg font-bold text-indigo-600 shadow-sm dark:bg-slate-900">{(studentIdentity?.full_name?.[0] ?? studentProfile.student_number[0] ?? 'S').toUpperCase()}</span>}
+          <div className="min-w-0">
+            <p className="text-lg font-bold">{studentIdentity?.full_name ?? 'Student profile'}</p>
+            <p className="mt-1 text-xs font-semibold text-indigo-700 dark:text-indigo-300">{studentProfile.student_number} · {studentProfile.student_status.replaceAll('_', ' ')}</p>
+            <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">
+              {studentProgramme ? `${studentProgramme.code} · ${studentProgramme.name}` : 'Programme not set'} · {studentProfile.study_year ? `Year ${studentProfile.study_year}` : 'Study year not set'}
+            </p>
+          </div>
           {subjects.length === 0 && (
             <p className="mt-2 text-slate-600 dark:text-slate-400">
               No course offerings are linked yet. Ask the registrar to assign your study year and map the programme year to the current offerings.

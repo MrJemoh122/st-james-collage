@@ -422,6 +422,7 @@ export function TimetablePage({ role, userId }: Props) {
   const canManage = academicAdminRoles.includes(role)
   const [offerings, setOfferings] = useState<Offering[]>([])
   const [slots, setSlots] = useState<Slot[]>([])
+  const [lecturers, setLecturers] = useState<Array<{ id: string; staff_number: string; profile: { full_name: string } | Array<{ full_name: string }> | null }>>([])
   const [filter, setFilter] = useState('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -460,6 +461,21 @@ export function TimetablePage({ role, userId }: Props) {
         .order('starts_at')
       if (slotResult.error) throw slotResult.error
       setSlots((slotResult.data ?? []) as Slot[])
+      if (offeringIds.length) {
+        const lecturerIds = [...new Set(visibleOfferings.map((offering) => offering.lecturer_id).filter((id): id is string => Boolean(id)))]
+        if (lecturerIds.length) {
+          const lecturerResult = await supabase
+            .from('college_staff')
+            .select('id,staff_number,profile:college_profiles(full_name)')
+            .in('id', lecturerIds)
+          if (lecturerResult.error) throw lecturerResult.error
+          setLecturers((lecturerResult.data ?? []) as typeof lecturers)
+        } else {
+          setLecturers([])
+        }
+      } else {
+        setLecturers([])
+      }
     } catch (caught) { setError(messageOf(caught)) } finally { setLoading(false) }
   }, [canManage, role, userId])
   usePageData(load, [load])
@@ -562,7 +578,9 @@ export function TimetablePage({ role, userId }: Props) {
         const offering = related(slot.offering)
         const course = related(offering?.course)
         const department = related(course?.department)
-        return <Row key={slot.id}><Cell>{dayNames[slot.day_of_week - 1] ?? slot.day_of_week}</Cell><Cell>{slot.starts_at.slice(0, 5)}–{slot.ends_at.slice(0, 5)}</Cell><Cell>{department?.code ?? '—'} · {department?.name ?? ''}</Cell><Cell>{course?.code} · {course?.name}</Cell><Cell>{offering?.section ?? '—'}</Cell><Cell>{offering?.lecturer_id ?? 'Unassigned'}</Cell><Cell>{slot.room ?? '—'}</Cell><Cell>{slot.slot_status}</Cell>{canManage && <Cell><div className="flex gap-2">{slot.slot_status === 'scheduled' && <><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => editSlot(slot)} type="button">Edit</button><button className="text-rose-700" disabled={busy} onClick={() => void cancelSlot(slot)} type="button">Cancel</button></>}</div></Cell>}</Row>
+        const lecturer = lecturers.find((member) => member.id === offering?.lecturer_id)
+        const lecturerProfile = Array.isArray(lecturer?.profile) ? lecturer?.profile[0] : lecturer?.profile
+        return <Row key={slot.id}><Cell>{dayNames[slot.day_of_week - 1] ?? slot.day_of_week}</Cell><Cell>{slot.starts_at.slice(0, 5)}–{slot.ends_at.slice(0, 5)}</Cell><Cell>{department?.code ?? '—'} · {department?.name ?? ''}</Cell><Cell>{course?.code} · {course?.name}</Cell><Cell>{offering?.section ?? '—'}</Cell><Cell>{lecturerProfile?.full_name ?? lecturer?.staff_number ?? 'Unassigned'}</Cell><Cell>{slot.room ?? '—'}</Cell><Cell>{slot.slot_status}</Cell>{canManage && <Cell><div className="flex gap-2">{slot.slot_status === 'scheduled' && <><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => editSlot(slot)} type="button">Edit</button><button className="text-rose-700" disabled={busy} onClick={() => void cancelSlot(slot)} type="button">Cancel</button></>}</div></Cell>}</Row>
       })}</Table></Panel> : <Empty>No timetable entries are visible to this account.</Empty>}
       {!canManage && <p className="text-xs text-slate-500">Your account has read-only timetable access.</p>}
     </PageFrame>
@@ -574,6 +592,8 @@ export function ExaminationsPage({ role, userId }: Props) {
   const canEnterResults = canManage
   const [offerings, setOfferings] = useState<Offering[]>([])
   const [exams, setExams] = useState<Exam[]>([])
+  const [publishedResults, setPublishedResults] = useState<Array<{ title: string; score: number; max_score: number; graded_at: string }>>([])
+  const [requests, setRequests] = useState<Array<{ id: string; type: 'examination' | 'semester'; examTitle?: string; reason: string; status: 'submitted' }>>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -584,17 +604,32 @@ export function ExaminationsPage({ role, userId }: Props) {
     if (!supabase) { setError('Supabase is not configured.'); setLoading(false); return }
     setLoading(true); setError('')
     try {
-      const [offeringResult, examResult] = await Promise.all([
+      const [offeringResult, examResult, enrollmentResult, resultResult] = await Promise.all([
         supabase.from('college_course_offerings').select('id,academic_year,term,section,lecturer_id,course:college_courses(id,code,name,department_id)').order('academic_year', { ascending: false }),
         supabase.from('college_examinations').select('id,course_offering_id,title,scheduled_at,max_score,exam_status,offering:college_course_offerings(id,academic_year,term,section,lecturer_id,course:college_courses(id,code,name,department_id))').order('scheduled_at', { ascending: false }),
+        role === 'student'
+          ? supabase.from('college_enrollments').select('course_offering_id').eq('student_id', userId).eq('enrollment_status', 'enrolled')
+          : Promise.resolve({ data: [], error: null }),
+        role === 'student'
+          ? supabase.from('college_exam_results').select('score,graded_at,examination:college_examinations(title,max_score)').eq('student_id', userId).not('published_at', 'is', null).order('graded_at', { ascending: false })
+          : Promise.resolve({ data: [], error: null }),
       ])
       if (offeringResult.error) throw offeringResult.error
       if (examResult.error) throw examResult.error
+      if (enrollmentResult.error) throw enrollmentResult.error
+      if (resultResult.error) throw resultResult.error
       const allOfferings = (offeringResult.data ?? []) as Offering[]
       setOfferings(role === 'lecturer'
         ? allOfferings.filter((offering) => offering.lecturer_id === userId)
         : allOfferings)
-      setExams((examResult.data ?? []) as Exam[])
+      const allExams = (examResult.data ?? []) as Exam[]
+      setExams(role === 'student'
+        ? allExams.filter((exam) => (enrollmentResult.data ?? []).some((row) => row.course_offering_id === exam.course_offering_id))
+        : allExams)
+      setPublishedResults(((resultResult.data ?? []) as Array<{ score: number; graded_at: string; examination: { title: string; max_score: number } | Array<{ title: string; max_score: number }> | null }>).flatMap((row) => {
+        const exam = Array.isArray(row.examination) ? row.examination[0] : row.examination
+        return exam ? [{ title: exam.title, score: Number(row.score), max_score: Number(exam.max_score), graded_at: row.graded_at }] : []
+      }))
     } catch (caught) { setError(messageOf(caught)) } finally { setLoading(false) }
   }, [role, userId])
   usePageData(load, [load])
@@ -654,9 +689,52 @@ export function ExaminationsPage({ role, userId }: Props) {
     setSuccess('Existing results for this examination were published.')
   }
 
+  useEffect(() => {
+    if (role !== 'student') return
+    try {
+      const saved = window.localStorage.getItem(`stjames-postponement-${userId}`)
+      setRequests(saved ? JSON.parse(saved) : [])
+    } catch {
+      setRequests([])
+    }
+  }, [role, userId])
+
+  function submitPostponement(type: 'examination' | 'semester', examTitle = '') {
+    const reason = window.prompt(type === 'examination'
+      ? `Why should ${examTitle || 'this examination'} be postponed?`
+      : 'Why should the semester be postponed?')
+    if (!reason?.trim()) return
+    const next = [{ id: crypto.randomUUID(), type, examTitle: examTitle || undefined, reason: reason.trim(), status: 'submitted' as const }, ...requests]
+    setRequests(next)
+    window.localStorage.setItem(`stjames-postponement-${userId}`, JSON.stringify(next))
+    setSuccess('Postponement request saved locally. Submit it to the registrar for formal approval.')
+  }
+
+  function downloadTicket(exam: Exam) {
+    const offering = related(exam.offering)
+    const course = related(offering?.course)
+    const ticket = `<!doctype html><html><head><title>Examination Ticket</title><style>body{font-family:Arial;margin:40px;color:#0f172a}.ticket{max-width:700px;margin:auto;border:3px solid #1d4ed8;border-radius:16px;padding:32px}.title{font-size:24px;font-weight:bold}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:24px}.label{font-size:11px;text-transform:uppercase;color:#64748b}.value{font-size:14px;font-weight:bold;margin-top:4px}@media print{body{margin:0}.ticket{border-width:2px}}</style></head><body><div class="ticket"><div class="title">ST JAMES COLLEGE</div><p>Student Examination Ticket</p><div class="grid"><div><div class="label">Student ID</div><div class="value">${userId}</div></div><div><div class="label">Course</div><div class="value">${course?.code ?? ''} ${course?.name ?? ''}</div></div><div><div class="label">Examination</div><div class="value">${exam.title}</div></div><div><div class="label">Date & Time</div><div class="value">${exam.scheduled_at ? new Date(exam.scheduled_at).toLocaleString() : 'To be announced'}</div></div><div><div class="label">Venue</div><div class="value">Assigned by examination office</div></div><div><div class="label">Status</div><div class="value">${exam.exam_status}</div></div></div></div></body></html>`
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(new Blob([ticket], { type: 'text/html;charset=utf-8' }))
+    link.download = `examination-ticket-${exam.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.html`
+    link.click()
+    URL.revokeObjectURL(link.href)
+  }
+
   return (
     <PageFrame title="Examinations" description="Create exams, record scores and publish results using the existing course-offering and result records." actions={<button className="secondary-button" onClick={() => void load()} type="button"><RefreshCw size={14} /> Refresh</button>}>
       <Notice error={error} success={success} />
+      {role === 'student' && (
+        <div className="grid gap-5 xl:grid-cols-2">
+          <Panel title={`Coursework and published results (${publishedResults.length})`}>
+            {publishedResults.length ? <Table headers={['Assessment', 'Score', 'Out of', 'Graded']}>{publishedResults.map((result, index) => <Row key={`${result.title}-${index}`}><Cell>{result.title}</Cell><Cell>{result.score}</Cell><Cell>{result.max_score}</Cell><Cell>{new Date(result.graded_at).toLocaleDateString()}</Cell></Row>)}</Table> : <Empty>No published coursework or results are available yet.</Empty>}
+          </Panel>
+          <Panel title="Postponement requests">
+            <button className="secondary-button" onClick={() => submitPostponement('semester')} type="button">Postpone semester</button>
+            {requests.length ? <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">{requests.map((request) => <div className="py-3 text-xs" key={request.id}><p className="font-semibold">{request.type === 'semester' ? 'Semester postponement' : `Examination · ${request.examTitle ?? ''}`}</p><p className="mt-1 text-slate-500">{request.reason}</p><p className="mt-1 text-[10px] text-amber-700">Submitted · awaiting formal review</p></div>)}</div> : <p className="mt-4 text-xs text-slate-500">No postponement requests saved on this device.</p>}
+          </Panel>
+        </div>
+      )}
       {canManage && <Panel title="Create examination"><form className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4" onSubmit={createExam}>
         <Field label="Course offering"><SelectInput onChange={(event) => setExamForm({ ...examForm, course_offering_id: event.target.value })} required value={examForm.course_offering_id}><option value="">Select offering</option>{offerings.map((offering) => <option key={offering.id} value={offering.id}>{related(offering.course)?.code} · {offering.section} · {offering.academic_year}</option>)}</SelectInput></Field>
         <Field label="Title"><TextInput maxLength={160} onChange={(event) => setExamForm({ ...examForm, title: event.target.value })} required value={examForm.title} /></Field>
@@ -670,7 +748,7 @@ export function ExaminationsPage({ role, userId }: Props) {
         <Field label="Score"><TextInput min="0" onChange={(event) => setResultForm({ ...resultForm, score: event.target.value })} required step="0.01" type="number" value={resultForm.score} /></Field>
         <button className="primary-button self-end" disabled={busy || !exams.length} type="submit">Save result</button>
       </form><p className="mt-3 text-[11px] text-slate-500">Student identity and maximum-score checks are enforced by database policies and constraints. Use the student’s account UUID; results remain unpublished until an authorized officer publishes them.</p></Panel>}
-      {loading ? <Loading /> : exams.length ? <Panel title={`Examinations (${exams.length})`}><Table headers={['Title', 'Course offering', 'Scheduled', 'Maximum', 'Status', 'Actions']}>{exams.map((exam) => <Row key={exam.id}><Cell>{exam.title}</Cell><Cell>{related(related(exam.offering)?.course)?.code} · {related(exam.offering)?.section} · {related(exam.offering)?.academic_year}</Cell><Cell>{exam.scheduled_at ? new Date(exam.scheduled_at).toLocaleString() : 'Not scheduled'}</Cell><Cell>{exam.max_score}</Cell><Cell>{exam.exam_status}</Cell><Cell><div className="flex flex-wrap gap-2">{canManage && exam.exam_status !== 'cancelled' && <button className="text-rose-700" disabled={busy} onClick={() => void updateExamStatus(exam, 'cancelled')} type="button">Cancel</button>}{examAdminRoles.includes(role) && <button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void publishResults(exam)} type="button">Publish results</button>}</div></Cell></Row>)}</Table></Panel> : <Empty>No examinations are recorded.</Empty>}
+      {loading ? <Loading /> : exams.length ? <Panel title={`Examinations (${exams.length})`}><Table headers={['Title', 'Course offering', 'Scheduled', 'Maximum', 'Status', 'Actions']}>{exams.map((exam) => <Row key={exam.id}><Cell>{exam.title}</Cell><Cell>{related(related(exam.offering)?.course)?.code} · {related(exam.offering)?.section} · {related(exam.offering)?.academic_year}</Cell><Cell>{exam.scheduled_at ? new Date(exam.scheduled_at).toLocaleString() : 'Not scheduled'}</Cell><Cell>{exam.max_score}</Cell><Cell>{exam.exam_status}</Cell><Cell><div className="flex flex-wrap gap-2">{role === 'student' && exam.exam_status !== 'cancelled' && <><button className="text-indigo-700 dark:text-indigo-300" onClick={() => downloadTicket(exam)} type="button">Download ticket</button><button className="text-amber-700 dark:text-amber-300" onClick={() => submitPostponement('examination', exam.title)} type="button">Postpone</button></>}{canManage && exam.exam_status !== 'cancelled' && <button className="text-rose-700" disabled={busy} onClick={() => void updateExamStatus(exam, 'cancelled')} type="button">Cancel</button>}{examAdminRoles.includes(role) && <button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void publishResults(exam)} type="button">Publish results</button>}</div></Cell></Row>)}</Table></Panel> : <Empty>No examinations are recorded.</Empty>}
     </PageFrame>
   )
 }
@@ -679,6 +757,7 @@ export function FinancePage({ role, userId }: Props) {
   const canManage = financeRoles.includes(role)
   const [charges, setCharges] = useState<FeeCharge[]>([])
   const [payments, setPayments] = useState<Payment[]>([])
+  const [financeTab, setFinanceTab] = useState<'generate' | 'bills' | 'payments' | 'statement'>('generate')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -726,9 +805,52 @@ export function FinancePage({ role, userId }: Props) {
     return totals
   }, [charges, payments])
 
+  function downloadStatement() {
+    const ownCharges = role === 'student' ? charges.filter((charge) => charge.student_id === userId) : charges
+    const ownPayments = role === 'student' ? payments.filter((payment) => payment.student_id === userId) : payments
+    const rows: Array<Record<string, string | number | null>> = [
+      ...ownCharges.map((charge) => ({ type: 'bill', description: charge.description, academic_year: charge.academic_year, amount: Number(charge.amount), currency: charge.currency, date: charge.due_on })),
+      ...ownPayments.map((payment) => ({ type: `payment:${payment.payment_status}`, description: 'Payment', academic_year: '', amount: Number(payment.amount), currency: payment.currency, date: payment.paid_at })),
+    ]
+    downloadCsv(`student-finance-statement-${new Date().toISOString().slice(0, 10)}.csv`, rows)
+  }
+
+  function downloadBill(charge: FeeCharge) {
+    const balance = balanceByStudent.get(charge.student_id) ?? 0
+    downloadCsv(`student-bill-${charge.academic_year}-${charge.description.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.csv`, [{
+      student_account: charge.student_id,
+      description: charge.description,
+      academic_year: charge.academic_year,
+      amount: Number(charge.amount),
+      currency: charge.currency,
+      due_on: charge.due_on,
+      account_balance: balance,
+    }])
+  }
+
   return (
     <PageFrame title="Finance" description="Review fee charges and verified payment records. Payment entry is intentionally unavailable until a trusted payment integration is configured." actions={<button className="secondary-button" onClick={() => void load()} type="button"><RefreshCw size={14} /> Refresh</button>}>
       <Notice error={error} success={success} />
+      {role === 'student' && (
+        <>
+          <div className="flex flex-wrap gap-2">
+            {[
+              ['generate', 'Generate bill'],
+              ['bills', 'My bills'],
+              ['payments', 'My payments'],
+              ['statement', 'My statement'],
+            ].map(([tab, label]) => <button className={financeTab === tab ? 'primary-button' : 'secondary-button'} key={tab} onClick={() => setFinanceTab(tab as typeof financeTab)} type="button">{label}</button>)}
+          </div>
+          {loading ? <Loading /> : (
+            <div className="grid gap-5">
+              {financeTab === 'generate' && <Panel title="Generate bill"><p className="mb-4 text-xs text-slate-500">Download a bill for an outstanding fee charge. This is an account document, not a payment receipt.</p>{charges.filter((charge) => charge.student_id === userId).length ? <Table headers={['Description', 'Academic year', 'Amount', 'Due', 'Action']}>{charges.filter((charge) => charge.student_id === userId).map((charge) => <Row key={charge.id}><Cell>{charge.description}</Cell><Cell>{charge.academic_year}</Cell><Cell>{Number(charge.amount).toLocaleString()} {charge.currency}</Cell><Cell>{charge.due_on ?? '—'}</Cell><Cell><button className="text-indigo-700 dark:text-indigo-300" onClick={() => downloadBill(charge)} type="button">Download bill</button></Cell></Row>)}</Table> : <Empty>No bills are available to generate.</Empty>}</Panel>}
+              {financeTab === 'bills' && <Panel title="My bills"><Table headers={['Description', 'Academic year', 'Amount', 'Due', 'Balance']}>{charges.filter((charge) => charge.student_id === userId).map((charge) => <Row key={charge.id}><Cell>{charge.description}</Cell><Cell>{charge.academic_year}</Cell><Cell>{Number(charge.amount).toLocaleString()} {charge.currency}</Cell><Cell>{charge.due_on ?? '—'}</Cell><Cell>{(balanceByStudent.get(charge.student_id) ?? 0).toLocaleString()} TZS</Cell></Row>)}</Table></Panel>}
+              {financeTab === 'payments' && <Panel title="My payments"><Table headers={['Amount', 'Status', 'Paid date', 'Reference']}>{payments.filter((payment) => payment.student_id === userId).map((payment) => <Row key={payment.id}><Cell>{Number(payment.amount).toLocaleString()} {payment.currency}</Cell><Cell>{payment.payment_status}</Cell><Cell>{payment.paid_at ? new Date(payment.paid_at).toLocaleDateString() : '—'}</Cell><Cell>{payment.charge_id ?? '—'}</Cell></Row>)}</Table></Panel>}
+              {financeTab === 'statement' && <Panel title="My statement"><div className="flex items-center justify-between gap-3"><div><p className="text-2xl font-bold">{(balanceByStudent.get(userId) ?? 0).toLocaleString()} TZS</p><p className="mt-1 text-xs text-slate-500">Current outstanding balance</p></div><button className="secondary-button" onClick={downloadStatement} type="button"><Download size={14} /> Download statement</button></div></Panel>}
+            </div>
+          )}
+        </>
+      )}
       {canManage && <Panel title="Add fee charge"><form className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" onSubmit={addCharge}>
         <Field label="Student account ID"><TextInput onChange={(event) => setForm({ ...form, student_id: event.target.value })} required value={form.student_id} /></Field>
         <Field label="Description"><TextInput maxLength={160} onChange={(event) => setForm({ ...form, description: event.target.value })} required value={form.description} /></Field>
@@ -737,14 +859,14 @@ export function FinancePage({ role, userId }: Props) {
         <Field label="Due date"><TextInput onChange={(event) => setForm({ ...form, due_on: event.target.value })} type="date" value={form.due_on} /></Field>
         <button className="primary-button self-end" disabled={busy} type="submit"><Plus size={14} /> Add charge</button>
       </form></Panel>}
-      {loading ? <Loading /> : <div className="grid gap-5">
+      {role !== 'student' && (loading ? <Loading /> : <div className="grid gap-5">
         <Panel title={`Fee charges (${charges.length})`}>
           {charges.length ? <Table headers={['Student', 'Description', 'Academic year', 'Amount', 'Due', 'Balance across visible records']}>{charges.map((charge) => <Row key={charge.id}><Cell>{charge.student_id}</Cell><Cell>{charge.description}</Cell><Cell>{charge.academic_year}</Cell><Cell>{Number(charge.amount).toLocaleString()} {charge.currency}</Cell><Cell>{charge.due_on ?? '—'}</Cell><Cell>{(balanceByStudent.get(charge.student_id) ?? 0).toLocaleString()} TZS</Cell></Row>)}</Table> : <Empty>No fee charges are visible to this account.</Empty>}
         </Panel>
         <Panel title={`Payments (${payments.length}) · read only`}>
           {payments.length ? <Table headers={['Student', 'Amount', 'Status', 'Payment date', 'Reference']}>{payments.map((payment) => <Row key={payment.id}><Cell>{payment.student_id}</Cell><Cell>{Number(payment.amount).toLocaleString()} {payment.currency}</Cell><Cell>{payment.payment_status}</Cell><Cell>{payment.paid_at ? new Date(payment.paid_at).toLocaleDateString() : '—'}</Cell><Cell>{payment.charge_id ?? '—'}</Cell></Row>)}</Table> : <Empty>No payment records are visible to this account. No payment has been recorded by this screen.</Empty>}
         </Panel>
-      </div>}
+      </div>)}
     </PageFrame>
   )
 }
