@@ -167,7 +167,7 @@ function App() {
       try {
         const { data, error } = await supabase
           .from('college_profiles')
-          .select('role')
+          .select('role,is_suspended')
           .eq('id', user.id)
           .maybeSingle()
         if (!active) return
@@ -176,6 +176,9 @@ function App() {
           setRole(null)
         } else if (!data) {
           setRoleError('Your account profile was not found. Ask the college administrator to verify the database setup.')
+          setRole(null)
+        } else if (data.is_suspended) {
+          setRoleError('This account is suspended. Contact a super administrator to restore access.')
           setRole(null)
         } else if (!Object.hasOwn(moduleAccess, data.role)) {
           setRoleError('Your account has an unrecognized college role. Ask an administrator to verify your role assignment.')
@@ -194,6 +197,38 @@ function App() {
 
     return () => { active = false }
   }, [user, roleRefresh])
+
+  useEffect(() => {
+    if (!user || !supabase) return
+    const client = supabase
+    let active = true
+    const checkSuspension = async () => {
+      const { data, error } = await client
+        .from('college_profiles')
+        .select('is_suspended')
+        .eq('id', user.id)
+        .maybeSingle()
+      if (!active) return
+      if (error) {
+        console.error('Unable to verify account suspension status:', error.message)
+      } else if (!data || data.is_suspended) {
+        setRoleError(data
+          ? 'This account is suspended. Contact a super administrator to restore access.'
+          : 'This account no longer has a college profile. Sign out and contact a super administrator.')
+        setRole(null)
+      }
+    }
+    const checkWhenVisible = () => {
+      if (document.visibilityState === 'visible') void checkSuspension()
+    }
+    const intervalId = window.setInterval(checkWhenVisible, 30_000)
+    document.addEventListener('visibilitychange', checkWhenVisible)
+    return () => {
+      active = false
+      window.clearInterval(intervalId)
+      document.removeEventListener('visibilitychange', checkWhenVisible)
+    }
+  }, [user])
 
   const visibleModules = useMemo(
     () => modules.filter((module) => role && moduleAccess[role]?.includes(module.name)),
@@ -437,7 +472,7 @@ function App() {
           {page === 'Overview' ? (
             <Dashboard onNavigate={navigate} availableModules={visibleModules} role={role!} userId={user.id} />
           ) : page === 'Settings' ? (
-            <SettingsPage darkMode={darkMode} onThemeChange={() => setDarkMode((value) => !value)} role={role!} />
+            <SettingsPage darkMode={darkMode} onThemeChange={() => setDarkMode((value) => !value)} role={role!} userId={user.id} />
           ) : page === 'Students' ? (
             <StudentsPage canManage={canManageDepartments} />
           ) : page === 'Staff' ? (
@@ -1086,10 +1121,12 @@ function SettingsPage({
   darkMode,
   onThemeChange,
   role,
+  userId,
 }: {
   darkMode: boolean
   onThemeChange: () => void
   role: CollegeRole
+  userId: string
 }) {
   return (
     <div className="mx-auto max-w-3xl">
@@ -1118,13 +1155,25 @@ function SettingsPage({
           </div>
         </div>
       </section>
-      {role === 'super_admin' && <SuperAdminUserManagement />}
+      {role === 'super_admin' && <SuperAdminUserManagement currentUserId={userId} />}
     </div>
   )
 }
 
-function SuperAdminUserManagement() {
-  const [profiles, setProfiles] = useState<Array<{ id: string; email: string | null; full_name: string | null; role: CollegeRole; created_at: string }>>([])
+function SuperAdminUserManagement({ currentUserId }: { currentUserId: string }) {
+  type ManagedProfile = {
+    id: string
+    email: string | null
+    full_name: string | null
+    role: CollegeRole
+    created_at: string
+    is_staff: boolean
+    department_id: string | null
+    is_suspended: boolean
+  }
+  const [profiles, setProfiles] = useState<ManagedProfile[]>([])
+  const [departments, setDepartments] = useState<Array<{ id: string; code: string; name: string }>>([])
+  const [departmentSelections, setDepartmentSelections] = useState<Record<string, string>>({})
   const [filter, setFilter] = useState('')
   const [page, setPage] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -1141,11 +1190,29 @@ function SuperAdminUserManagement() {
   const load = useCallback(async () => {
     if (!supabase) { setError('Supabase is not configured.'); setLoading(false); return }
     setLoading(true); setError('')
-    const { data, error: queryError } = await supabase.from('college_profiles')
-      .select('id,email,full_name,role,created_at')
-      .order('created_at', { ascending: false })
-    if (queryError) setError(queryError.message)
-    else setProfiles((data ?? []) as typeof profiles)
+    const [profileResult, staffResult, departmentResult] = await Promise.all([
+      supabase.from('college_profiles').select('id,email,full_name,role,created_at,is_suspended').order('created_at', { ascending: false }),
+      supabase.from('college_staff').select('id,department_id'),
+      supabase.from('college_departments').select('id,code,name').eq('is_active', true).order('name'),
+    ])
+    const queryError = profileResult.error ?? staffResult.error ?? departmentResult.error
+    if (queryError) {
+      setError(queryError.message)
+    } else {
+      const staffById = new Map((staffResult.data ?? []).map((staff) => [staff.id, staff.department_id]))
+      const staffProfiles = (profileResult.data ?? []).map((profile) => ({
+        ...profile,
+        is_staff: staffById.has(profile.id),
+        department_id: staffById.get(profile.id) ?? null,
+      }))
+      const selections: Record<string, string> = {}
+      staffById.forEach((departmentId, id) => {
+        if (departmentId) selections[id] = departmentId
+      })
+      setProfiles(staffProfiles as ManagedProfile[])
+      setDepartments(departmentResult.data ?? [])
+      setDepartmentSelections(selections)
+    }
     setLoading(false)
   }, [])
 
@@ -1173,6 +1240,66 @@ function SuperAdminUserManagement() {
     await load()
   }
 
+  async function assignDepartmentHead(profile: ManagedProfile) {
+    if (!supabase || !profile.is_staff) return
+    const departmentId = departmentSelections[profile.id] ?? profile.department_id
+    const department = departments.find((item) => item.id === departmentId)
+    if (!departmentId || !department) {
+      setError('Select an active department for this staff member.')
+      return
+    }
+    if (!window.confirm(`Assign ${profile.email ?? profile.full_name ?? profile.id} as head of ${department.name}? Their role will be changed to department head.`)) return
+
+    setBusyId(profile.id); setError(''); setSuccess('')
+    const { error: assignmentError } = await supabase.rpc('stj_assign_department_head', {
+      p_user_id: profile.id,
+      p_department_id: departmentId,
+    })
+    setBusyId('')
+    if (assignmentError) { setError(assignmentError.message); return }
+    setSuccess('Department head assigned and audited.')
+    await load()
+  }
+
+  async function manageAccount(profile: ManagedProfile, action: 'suspend' | 'restore' | 'delete') {
+    if (!supabase) { setError('Supabase is not configured.'); return }
+    const accountName = profile.email ?? profile.full_name ?? profile.id
+    const confirmation = action === 'delete'
+      ? `Permanently delete ${accountName} and their personal student/staff records, including academic and finance records? Shared institutional records will be kept and any required staff attribution will be transferred to your account. This cannot be undone.`
+      : action === 'suspend'
+        ? `Suspend ${accountName}? They will be blocked from signing in until a super admin restores the account.`
+        : `Restore ${accountName}'s sign-in access?`
+    if (!window.confirm(confirmation)) return
+
+    setBusyId(profile.id); setError(''); setSuccess('')
+    try {
+      const { error: actionError } = await supabase.functions.invoke('manage-college-account', {
+        body: { action, target_user_id: profile.id },
+      })
+      if (actionError) {
+        let message = actionError.message
+        if ('context' in actionError && actionError.context instanceof Response) {
+          const result: unknown = await actionError.context.clone().json().catch(() => null)
+          if (result && typeof result === 'object' && 'error' in result && typeof result.error === 'string') {
+            message = result.error
+          }
+        }
+        if (action === 'delete') await load()
+        setError(message)
+        return
+      }
+
+      setSuccess(action === 'delete'
+        ? 'Account and personal records deleted. Shared institutional records were preserved.'
+        : action === 'suspend' ? 'Account suspended.' : 'Account restored.')
+      await load()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The account action could not be completed.')
+    } finally {
+      setBusyId('')
+    }
+  }
+
   return (
     <section className="mt-7 rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
@@ -1184,22 +1311,32 @@ function SuperAdminUserManagement() {
       <label className="mt-4 block max-w-sm"><span className="mb-1.5 block text-[11px] font-semibold">Search name, email or role</span><input className="form-input" onChange={(event) => { setFilter(event.target.value); setPage(0) }} value={filter} /></label>
       {loading ? <div className="grid min-h-32 place-items-center text-sm text-slate-500"><span className="loading-dot" /></div> : visible.length ? (
         <div className="mt-4 overflow-x-auto">
-          <table className="w-full min-w-[700px] text-left text-xs">
-            <thead><tr className="border-b border-slate-100 text-slate-500 dark:border-slate-800"><th className="px-3 py-2">Name</th><th className="px-3 py-2">Email</th><th className="px-3 py-2">Created</th><th className="px-3 py-2">Role</th><th className="px-3 py-2">Account ID</th></tr></thead>
+          <table className="w-full min-w-[1250px] text-left text-xs">
+            <thead><tr className="border-b border-slate-100 text-slate-500 dark:border-slate-800"><th className="px-3 py-2">Name</th><th className="px-3 py-2">Email</th><th className="px-3 py-2">Created</th><th className="px-3 py-2">Role</th><th className="px-3 py-2">Department head</th><th className="px-3 py-2">Account ID</th><th className="px-3 py-2">Account actions</th></tr></thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {visible.map((profile) => <tr key={profile.id}>
+              {visible.map((profile) => {
+                const hasOtherActiveSuperAdmin = profiles.some((item) =>
+                  item.id !== profile.id && item.role === 'super_admin' && !item.is_suspended,
+                )
+                const accountActionDisabled = busyId === profile.id
+                  || profile.id === currentUserId
+                  || (profile.role === 'super_admin' && !hasOtherActiveSuperAdmin)
+                return <tr key={profile.id}>
                 <td className="px-3 py-3">{profile.full_name ?? '—'}</td>
                 <td className="px-3 py-3">{profile.email ?? '—'}</td>
                 <td className="px-3 py-3">{new Date(profile.created_at).toLocaleDateString()}</td>
-                <td className="px-3 py-3"><select aria-label={`Role for ${profile.email ?? profile.id}`} className="form-input min-w-48" disabled={busyId === profile.id} onChange={(event) => { const selectedRole = roles.find((item) => item === event.target.value); if (selectedRole) void assignRole(profile, selectedRole) }} value={profile.role}>{roles.map((item) => <option key={item} value={item}>{item.replaceAll('_', ' ')}</option>)}</select></td>
+                <td className="px-3 py-3"><select aria-label={`Role for ${profile.email ?? profile.id}`} className="form-input min-w-48" disabled={busyId === profile.id} onChange={(event) => { const selectedRole = roles.find((item) => item === event.target.value); if (selectedRole) void assignRole(profile, selectedRole) }} value={profile.role}>{roles.filter((item) => item !== 'department_head' || profile.role === 'department_head').map((item) => <option key={item} value={item}>{item.replaceAll('_', ' ')}</option>)}</select></td>
+                <td className="px-3 py-3">{profile.is_staff ? <div className="flex min-w-64 gap-2"><select aria-label={`Department for ${profile.email ?? profile.id}`} className="form-input min-w-40" disabled={busyId === profile.id} onChange={(event) => setDepartmentSelections((current) => ({ ...current, [profile.id]: event.target.value }))} value={departmentSelections[profile.id] ?? profile.department_id ?? ''}><option value="">Select department</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select><button className="secondary-button whitespace-nowrap" disabled={busyId === profile.id || !departments.length} onClick={() => void assignDepartmentHead(profile)} type="button">Assign head</button></div> : <span className="text-slate-500">Staff account required</span>}</td>
                 <td className="max-w-40 truncate px-3 py-3 font-mono text-[10px]">{profile.id}</td>
-              </tr>)}
+                <td className="px-3 py-3"><div className="flex items-center gap-2"><span className={profile.is_suspended ? 'text-rose-700' : 'text-emerald-700'}>{profile.is_suspended ? 'Suspended' : 'Active'}</span><button className="secondary-button whitespace-nowrap" disabled={accountActionDisabled} onClick={() => void manageAccount(profile, profile.is_suspended ? 'restore' : 'suspend')} type="button">{profile.is_suspended ? 'Restore' : 'Suspend'}</button><button className="secondary-button whitespace-nowrap text-rose-600" disabled={accountActionDisabled} onClick={() => void manageAccount(profile, 'delete')} type="button">Delete</button></div></td>
+              </tr>
+              })}
             </tbody>
           </table>
           <div className="mt-4 flex items-center justify-between text-xs text-slate-500"><span>{filtered.length} accounts · page {currentPage + 1} of {pageCount}</span><div className="flex gap-2"><button className="secondary-button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)} type="button">Previous</button><button className="secondary-button" disabled={currentPage >= pageCount - 1} onClick={() => setPage(currentPage + 1)} type="button">Next</button></div></div>
         </div>
       ) : <p className="mt-5 text-xs text-slate-500">No accounts matched.</p>}
-      <p className="mt-4 border-t border-slate-100 pt-4 text-[11px] leading-5 text-slate-500 dark:border-slate-800">Account creation, activation/suspension and administrator-initiated password resets are not exposed here. They require a deployed trusted Auth administrative function; this browser never receives a service-role key.</p>
+      <p className="mt-4 border-t border-slate-100 pt-4 text-[11px] leading-5 text-slate-500 dark:border-slate-800">Department-head assignment and account actions are restricted to super admins and audited. Suspension blocks sign-in until restored; deletion removes the account's personal records while preserving shared institutional history.</p>
     </section>
   )
 }

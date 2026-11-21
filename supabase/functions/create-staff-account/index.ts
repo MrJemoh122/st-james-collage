@@ -49,11 +49,13 @@ Deno.serve(async (request) => {
 
   const { data: profile, error: profileError } = await callerClient
     .from('college_profiles')
-    .select('role')
+    .select('role,is_suspended')
     .eq('id', callerData.user.id)
     .maybeSingle()
   if (profileError) return response({ error: profileError.message }, 500)
-  if (!profile || !['super_admin', 'college_admin', 'academic_registrar'].includes(profile.role)) {
+  if (!profile
+      || profile.is_suspended
+      || !['super_admin', 'college_admin', 'academic_registrar'].includes(profile.role)) {
     return response({ error: 'You are not allowed to create staff accounts.' }, 403)
   }
 
