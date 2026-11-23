@@ -216,7 +216,7 @@ function downloadCsv(filename: string, rows: Array<Record<string, string | numbe
 }
 
 export function AcademicsPage({ role, userId }: Props) {
-  const canManage = academicAdminRoles.includes(role)
+  const canManage = academicAdminRoles.includes(role) || role === 'department_head'
   const [departments, setDepartments] = useState<Department[]>([])
   const [courses, setCourses] = useState<Course[]>([])
   const [offerings, setOfferings] = useState<Offering[]>([])
@@ -236,6 +236,12 @@ export function AcademicsPage({ role, userId }: Props) {
     setLoading(true)
     setError('')
     try {
+      const ownStaffResult = role === 'department_head'
+        ? await supabase.from('college_staff').select('department_id').eq('id', userId).maybeSingle()
+        : { data: null, error: null }
+      if (ownStaffResult.error) throw ownStaffResult.error
+      const ownDepartmentId = ownStaffResult.data?.department_id ?? null
+
       const [departmentResult, courseResult, offeringResult, enrollmentResult, programmeResult, mappingResult] = await Promise.all([
         supabase.from('college_departments').select('id,code,name').eq('is_active', true).order('name'),
         supabase.from('college_courses').select('id,code,name,department_id,credit_hours,is_active').order('code'),
@@ -262,11 +268,22 @@ export function AcademicsPage({ role, userId }: Props) {
         : role === 'student'
           ? allOfferings.filter((offering) => enrollmentResult.data?.some((enrollment) => enrollment.course_offering_id === offering.id))
           : canManage
-            ? allOfferings
+            ? allOfferings.filter((offering) =>
+                role !== 'department_head'
+                || !ownDepartmentId
+                || related(offering.course)?.department_id === ownDepartmentId)
             : []
       const offeringCourseIds = new Set(visibleOfferings.map((offering) => related(offering.course)?.id).filter((id): id is string => Boolean(id)))
-      setDepartments(departmentResult.data ?? [])
-      setCourses(canManage ? courseResult.data ?? [] : (courseResult.data ?? []).filter((course) => offeringCourseIds.has(course.id)))
+      const visibleDepartments = role === 'department_head' && ownDepartmentId
+        ? (departmentResult.data ?? []).filter((department) => department.id === ownDepartmentId)
+        : (departmentResult.data ?? [])
+      setDepartments(visibleDepartments)
+      setCourses(canManage
+        ? (courseResult.data ?? []).filter((course) =>
+            role !== 'department_head'
+            || !ownDepartmentId
+            || course.department_id === ownDepartmentId)
+        : (courseResult.data ?? []).filter((course) => offeringCourseIds.has(course.id)))
       setOfferings(visibleOfferings)
       setProgrammes(programmeResult.data ?? [])
       setProgrammeYearOfferings((mappingResult.data ?? []) as ProgrammeYearOffering[])

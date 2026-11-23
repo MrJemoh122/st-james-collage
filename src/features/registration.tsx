@@ -55,6 +55,7 @@ type StudentDirectoryEntry = {
 type StaffDirectoryEntry = {
   id: string
   staff_number: string
+  department_id?: string
   job_title: string | null
   employment_status: string
   photo_path: string | null
@@ -1437,7 +1438,7 @@ export function StudentsPage({ canManage }: { canManage: boolean }) {
   )
 }
 
-export function StaffPage() {
+export function StaffPage({ role }: { role: CollegeRole }) {
   const [staff, setStaff] = useState<StaffDirectoryEntry[]>([])
   const [departments, setDepartments] = useState<Department[]>([])
   const [loading, setLoading] = useState(true)
@@ -1456,10 +1457,13 @@ export function StaffPage() {
       return
     }
     setLoading(true)
+    const ownDepartmentId = role === 'department_head'
+      ? (await client.from('college_staff').select('department_id').eq('id', (await client.auth.getUser()).data.user?.id ?? '').maybeSingle()).data?.department_id ?? null
+      : null
     const [staffResult, departmentResult] = await Promise.all([
       client
         .from('college_staff')
-        .select('id,staff_number,job_title,employment_status,phone,photo_path,profile:college_profiles!college_staff_id_fkey(full_name,email,role),department:college_departments(name)')
+        .select('id,staff_number,department_id,job_title,employment_status,phone,photo_path,profile:college_profiles!college_staff_id_fkey(full_name,email,role),department:college_departments(name)')
         .order('staff_number'),
       client.from('college_departments').select('id,code,name,is_active').eq('is_active', true).order('name'),
     ])
@@ -1472,7 +1476,8 @@ export function StaffPage() {
       return
     }
     try {
-      const records = (staffResult.data ?? []) as StaffDirectoryEntry[]
+      const records = ((staffResult.data ?? []) as StaffDirectoryEntry[])
+        .filter((row) => !ownDepartmentId || row.department_id === ownDepartmentId)
       const rows = await Promise.all(records.map(async (row) => {
         if (!row.photo_path) return row
         const { data: photo, error: signedError } = await client.storage.from(bucket).createSignedUrl(row.photo_path, 300)
@@ -1481,7 +1486,11 @@ export function StaffPage() {
       }))
       if (isActive()) {
         setStaff(rows)
-        setDepartments(departmentResult.data ?? [])
+        const visibleDepartments = ownDepartmentId
+          ? (departmentResult.data ?? []).filter((department) => department.id === ownDepartmentId)
+          : (departmentResult.data ?? [])
+        setDepartments(visibleDepartments)
+        if (ownDepartmentId) setForm((current) => ({ ...current, departmentId: ownDepartmentId }))
         setError('')
       }
     } catch (caught) {
@@ -1537,7 +1546,7 @@ export function StaffPage() {
         <Field label="Full name" required><input className="form-input" maxLength={120} onChange={(event) => setForm({ ...form, fullName: event.target.value })} required value={form.fullName} /></Field>
         <Field label="Email address" required><input className="form-input" onChange={(event) => setForm({ ...form, email: event.target.value })} required type="email" value={form.email} /></Field>
         <Field label="Phone number" required><input className="form-input" maxLength={30} onChange={(event) => setForm({ ...form, phone: event.target.value })} required type="tel" value={form.phone} /></Field>
-        <Field label="Staff type" required><select className="form-input" onChange={(event) => setForm({ ...form, staffType: event.target.value })} value={form.staffType}><option value="lecturer">Lecturer</option><option value="non_teaching_staff">Non-teaching staff</option></select></Field>
+        <Field label="Staff type" required><select className="form-input" onChange={(event) => setForm({ ...form, staffType: event.target.value })} value={form.staffType}><option value="lecturer">Lecturer</option>{role !== 'department_head' && <option value="non_teaching_staff">Non-teaching staff</option>}</select></Field>
         <Field label="Department" required><select className="form-input" onChange={(event) => setForm({ ...form, departmentId: event.target.value })} required value={form.departmentId}><option value="">Choose department</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.code} · {department.name}</option>)}</select></Field>
         <Field label="Job title" required><input className="form-input" maxLength={120} onChange={(event) => setForm({ ...form, jobTitle: event.target.value })} required value={form.jobTitle} /></Field>
         <button className="primary-button sm:col-span-2 lg:col-span-3" disabled={busy || !departments.length} type="submit">{busy ? 'Sending secure invite…' : 'Create staff account'}</button>

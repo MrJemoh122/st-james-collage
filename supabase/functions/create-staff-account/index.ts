@@ -55,7 +55,7 @@ Deno.serve(async (request) => {
   if (profileError) return response({ error: profileError.message }, 500)
   if (!profile
       || profile.is_suspended
-      || !['super_admin', 'college_admin', 'academic_registrar'].includes(profile.role)) {
+      || !['super_admin', 'college_admin', 'academic_registrar', 'department_head'].includes(profile.role)) {
     return response({ error: 'You are not allowed to create staff accounts.' }, 403)
   }
 
@@ -82,10 +82,23 @@ Deno.serve(async (request) => {
       || fullName.length < 3 || fullName.length > 120
       || phone.length < 5 || phone.length > 30
       || !staffType
+      || (staffType !== 'lecturer' && profile.role === 'department_head')
       || typeof departmentId !== 'string'
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(departmentId)
       || jobTitle.length < 2 || jobTitle.length > 120) {
     return response({ error: 'Enter a valid email, name, phone, staff type, active department, and job title.' }, 400)
+  }
+
+  if (profile.role === 'department_head') {
+    const { data: actorStaff, error: actorStaffError } = await callerClient
+      .from('college_staff')
+      .select('department_id')
+      .eq('id', callerData.user.id)
+      .maybeSingle()
+    if (actorStaffError) return response({ error: actorStaffError.message }, 500)
+    if (!actorStaff || actorStaff.department_id !== departmentId) {
+      return response({ error: 'A department head can only create lecturers in their authorized department.' }, 403)
+    }
   }
 
   const adminClient = createClient(supabaseUrl, serviceRoleKey, {

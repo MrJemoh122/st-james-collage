@@ -77,7 +77,7 @@ const moduleAccess: Record<CollegeRole, string[]> = {
   super_admin: modules.map((module) => module.name),
   college_admin: modules.map((module) => module.name),
   academic_registrar: modules.map((module) => module.name),
-  department_head: ['Overview', 'Programmes', 'Academics', 'Examinations', 'Timetable', 'Reports'],
+  department_head: ['Overview', 'Staff', 'Departments', 'Programmes', 'Academics', 'Examinations', 'Timetable', 'Reports'],
   lecturer: ['Overview', 'Academics', 'Attendance', 'Examinations', 'Timetable'],
   student: ['Overview', 'Academics', 'Attendance', 'Examinations', 'Finance', 'Library', 'Timetable'],
   finance_accountant: ['Overview', 'Finance', 'Reports'],
@@ -476,7 +476,7 @@ function App() {
           ) : page === 'Students' ? (
             <StudentsPage canManage={canManageDepartments} />
           ) : page === 'Staff' ? (
-            <StaffPage />
+            <StaffPage role={role!} />
           ) : page === 'Departments' ? (
             <DepartmentsPage canManage={canManageDepartments} canDelete={canDeleteDepartments} />
           ) : page === 'Programmes' ? (
