@@ -1515,24 +1515,38 @@ export function StaffPage({ role }: { role: CollegeRole }) {
     setBusy(true)
     setError('')
     setSuccess('')
-    const { data, error: inviteError } = await supabase.functions.invoke<{ staff_number: string }>('create-staff-account', {
-      body: {
-        email: form.email.trim(),
-        full_name: form.fullName.trim(),
-        phone: form.phone.trim(),
-        staff_type: form.staffType,
-        department_id: form.departmentId,
-        job_title: form.jobTitle.trim(),
-      },
-    })
-    setBusy(false)
-    if (inviteError) {
-      setError(inviteError.message)
-      return
+    try {
+      const { data, error: inviteError } = await supabase.functions.invoke<{ staff_number: string }>('create-staff-account', {
+        body: {
+          email: form.email.trim(),
+          full_name: form.fullName.trim(),
+          phone: form.phone.trim(),
+          staff_type: form.staffType,
+          department_id: form.departmentId,
+          job_title: form.jobTitle.trim(),
+        },
+      })
+      if (inviteError) {
+        let errorMessage = inviteError.message
+        if (inviteError.name === 'FunctionsFetchError') {
+          errorMessage = `Could not reach the staff invitation Edge Function. Deploy it with "supabase functions deploy create-staff-account". Set APP_URL to the deployed portal base URL (include any deployment path); its origin must match ${window.location.origin}. Ensure the function's Supabase secrets are configured and APP_URL is included in Supabase Auth's allowed redirect URLs.`
+        } else if ('context' in inviteError && inviteError.context instanceof Response) {
+          const result: unknown = await inviteError.context.clone().json().catch(() => null)
+          if (result && typeof result === 'object' && 'error' in result && typeof result.error === 'string') {
+            errorMessage = result.error
+          }
+        }
+        setError(errorMessage)
+        return
+      }
+      setSuccess(`Invitation sent. Staff number: ${data?.staff_number ?? 'assigned'}. The staff member will set their own password from the email link.`)
+      setForm({ email: '', fullName: '', phone: '', staffType: 'lecturer', departmentId: '', jobTitle: '' })
+      await loadStaff()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The staff invitation could not be sent.')
+    } finally {
+      setBusy(false)
     }
-    setSuccess(`Invitation sent. Staff number: ${data?.staff_number ?? 'assigned'}. The staff member will set their own password from the email link.`)
-    setForm({ email: '', fullName: '', phone: '', staffType: 'lecturer', departmentId: '', jobTitle: '' })
-    await loadStaff()
   }
 
   return (
