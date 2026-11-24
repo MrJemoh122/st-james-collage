@@ -35,7 +35,7 @@ Deno.serve(async (request) => {
     return new Response('Student sign-in is unavailable.', { status: 500, headers: corsHeaders })
   }
 
-  let credentials: { student_number?: unknown; password?: unknown }
+  let credentials: { student_number?: unknown; staff_number?: unknown; password?: unknown }
   try {
     credentials = await request.json()
   } catch {
@@ -45,9 +45,14 @@ Deno.serve(async (request) => {
   const studentNumber = typeof credentials.student_number === 'string'
     ? credentials.student_number.trim().toUpperCase()
     : ''
+  const staffNumber = typeof credentials.staff_number === 'string'
+    ? credentials.staff_number.trim().toUpperCase()
+    : ''
+  const isStudentNumber = /^STJIT\/[A-Z0-9]{2,12}\/\d{4}\/\d{4}$/.test(studentNumber)
+  const isStaffNumber = /^STJ-S-\d{4}-\d{6}$/.test(staffNumber)
   const password = typeof credentials.password === 'string' ? credentials.password : ''
-  if (!/^STJIT\/[A-Z0-9]{2,12}\/\d{4}\/\d{4}$/.test(studentNumber) || !password) {
-    return new Response('Invalid student number or password.', { status: 401, headers: corsHeaders })
+  if ((!isStudentNumber && !isStaffNumber) || !password) {
+    return new Response('Invalid college account number or password.', { status: 401, headers: corsHeaders })
   }
 
   const admin = createClient(supabaseUrl, serviceRoleKey, {
@@ -57,32 +62,48 @@ Deno.serve(async (request) => {
     auth: { autoRefreshToken: false, persistSession: false },
   })
 
-  const { data: student, error: studentError } = await admin
-    .from('college_students')
-    .select('id')
-    .eq('student_number', studentNumber)
-    .maybeSingle()
-  if (studentError) {
-    console.error('Student number lookup failed:', studentError.message)
-    return new Response('Student sign-in is unavailable.', { status: 500, headers: corsHeaders })
-  }
-  if (!student) {
-    return new Response('Invalid student number or password.', { status: 401, headers: corsHeaders })
+  let accountId: string | null = null
+  if (isStudentNumber) {
+    const { data: student, error: studentError } = await admin
+      .from('college_students')
+      .select('id')
+      .eq('student_number', studentNumber)
+      .maybeSingle()
+    if (studentError) {
+      console.error('Student number lookup failed:', studentError.message)
+      return new Response('College account sign-in is unavailable.', { status: 500, headers: corsHeaders })
+    }
+    accountId = student?.id ?? null
+  } else {
+    const { data: staff, error: staffError } = await admin
+      .from('college_staff')
+      .select('id')
+      .eq('staff_number', staffNumber)
+      .maybeSingle()
+    if (staffError) {
+      console.error('Staff number lookup failed:', staffError.message)
+      return new Response('College account sign-in is unavailable.', { status: 500, headers: corsHeaders })
+    }
+    accountId = staff?.id ?? null
   }
 
-  const { data: userResult, error: userError } = await admin.auth.admin.getUserById(student.id)
+  if (!accountId) {
+    return new Response('Invalid college account number or password.', { status: 401, headers: corsHeaders })
+  }
+
+  const { data: userResult, error: userError } = await admin.auth.admin.getUserById(accountId)
   if (userError) {
-    console.error('Student auth account lookup failed:', userError.message)
-    return new Response('Student sign-in is unavailable.', { status: 500, headers: corsHeaders })
+    console.error('College account lookup failed:', userError.message)
+    return new Response('College account sign-in is unavailable.', { status: 500, headers: corsHeaders })
   }
   const email = userResult.user.email
   if (!email) {
-    return new Response('Invalid student number or password.', { status: 401, headers: corsHeaders })
+    return new Response('Invalid college account number or password.', { status: 401, headers: corsHeaders })
   }
 
   const { data: signIn, error: signInError } = await auth.auth.signInWithPassword({ email, password })
   if (signInError || !signIn.session) {
-    return new Response('Invalid student number or password.', { status: 401, headers: corsHeaders })
+    return new Response('Invalid college account number or password.', { status: 401, headers: corsHeaders })
   }
 
   return Response.json({

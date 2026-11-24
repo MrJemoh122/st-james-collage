@@ -1367,8 +1367,13 @@ function SignIn() {
         })
         if (error) throw error
       } else {
+        const accountNumber = identifier.trim().toUpperCase()
+        const isStaffNumber = /^STJ-S-\d{4}-\d{6}$/.test(accountNumber)
         const { data, error } = await supabase.functions.invoke('student-login', {
-          body: { student_number: identifier.trim(), password },
+          body: {
+            ...(isStaffNumber ? { staff_number: accountNumber } : { student_number: accountNumber }),
+            password,
+          },
         })
         if (error) throw error
         const tokens = data as { access_token?: string; refresh_token?: string } | null
@@ -1383,7 +1388,9 @@ function SignIn() {
       }
     } catch (error) {
       setIsError(true)
-      setMessage(error instanceof Error ? error.message : 'Sign-in failed.')
+      setMessage(error instanceof Error && error.name === 'FunctionsFetchError'
+        ? 'Could not reach the sign-in Edge Function. It may not be deployed, or this website address may not be allowed in STUDENT_LOGIN_ALLOWED_ORIGINS.'
+        : error instanceof Error ? error.message : 'Sign-in failed.')
     } finally {
       setBusy(false)
     }
@@ -1466,12 +1473,12 @@ function SignIn() {
               </p>
               <form className="mt-8 space-y-5" onSubmit={submit}>
                 <label className="block">
-                  <span className="mb-2 block text-xs font-semibold">Email or student registration number</span>
+                  <span className="mb-2 block text-xs font-semibold">Email, student registration number, or staff number</span>
                   <input
                     autoComplete="username"
                     className="form-input"
                     onChange={(event) => setIdentifier(event.target.value)}
-                    placeholder="name@college.edu or STJIT/CICT/0001/2026"
+                    placeholder="name@college.edu, STJIT/CICT/0001/2026, or STJ-S-2026-000001"
                     required
                     type="text"
                     value={identifier}
