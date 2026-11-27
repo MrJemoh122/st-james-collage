@@ -9,6 +9,10 @@ UPDATE public.college_students AS student
   WHERE programme.id = student.programme_id
     AND student.department_id IS NULL;
 
+ALTER TABLE public.college_student_applications
+  ADD COLUMN IF NOT EXISTS department_id uuid
+  REFERENCES public.college_departments (id) ON DELETE RESTRICT;
+
 ALTER TABLE public.college_students
   ALTER COLUMN department_id SET NOT NULL,
   ALTER COLUMN programme_id DROP NOT NULL;
@@ -30,7 +34,14 @@ DROP TRIGGER IF EXISTS college_programme_year_offerings_unmap_students
 
 DELETE FROM public.college_programme_year_offerings;
 DELETE FROM public.college_programme_year_enrollment_sources;
-DELETE FROM public.college_student_programme_history;
+
+DO $$
+BEGIN
+  IF pg_catalog.to_regclass('public.college_student_programme_history') IS NOT NULL THEN
+    EXECUTE 'DELETE FROM public.college_student_programme_history';
+  END IF;
+END;
+$$;
 
 UPDATE public.college_students
   SET programme_id = NULL;
@@ -66,9 +77,16 @@ DROP POLICY IF EXISTS college_programme_year_offerings_delete
 REVOKE ALL ON TABLE
   public.college_programmes,
   public.college_programme_year_offerings,
-  public.college_programme_year_enrollment_sources,
-  public.college_student_programme_history
+  public.college_programme_year_enrollment_sources
 FROM authenticated;
+
+DO $$
+BEGIN
+  IF pg_catalog.to_regclass('public.college_student_programme_history') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON TABLE public.college_student_programme_history FROM authenticated';
+  END IF;
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION public.set_college_student_application_department_placement(
   p_application_id uuid,
