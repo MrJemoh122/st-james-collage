@@ -8,7 +8,6 @@ type Props = { role: CollegeRole; userId: string }
 type Related<T> = T | T[] | null
 type Department = { id: string; code: string; name: string }
 type Course = { id: string; code: string; name: string; department_id: string; credit_hours: number; is_active: boolean }
-type Programme = { id: string; code: string; name: string; department_id: string; duration_years: number | null }
 type Staff = { id: string; staff_number: string }
 type Offering = {
   id: string
@@ -23,17 +22,6 @@ type Offering = {
   }>
 }
 type LecturerCourseRosterRow = { student_number: string; full_name: string }
-type ProgrammeYearOffering = {
-  id: string
-  study_year: number
-  programme: Related<Pick<Programme, 'code' | 'name'>>
-  offering: Related<{
-    academic_year: string
-    term: number
-    section: string
-    course: Related<Pick<Course, 'code' | 'name'>>
-  }>
-}
 type Slot = {
   id: string
   course_offering_id: string
@@ -224,8 +212,6 @@ export function AcademicsPage({ role, userId }: Props) {
   const [courses, setCourses] = useState<Course[]>([])
   const [offerings, setOfferings] = useState<Offering[]>([])
   const [availableStudentOfferings, setAvailableStudentOfferings] = useState<Offering[]>([])
-  const [programmes, setProgrammes] = useState<Programme[]>([])
-  const [programmeYearOfferings, setProgrammeYearOfferings] = useState<ProgrammeYearOffering[]>([])
   const [staff, setStaff] = useState<Staff[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -237,7 +223,6 @@ export function AcademicsPage({ role, userId }: Props) {
   const [rosterLoading, setRosterLoading] = useState(false)
   const [courseForm, setCourseForm] = useState({ department_id: '', code: '', name: '', credit_hours: '1' })
   const [offeringForm, setOfferingForm] = useState({ course_id: '', lecturer_id: '', academic_year: '', term: '1', section: 'A' })
-  const [mappingForm, setMappingForm] = useState({ programme_id: '', study_year: '1', course_offering_id: '' })
 
   const load = useCallback(async () => {
     if (!supabase) { setError('Supabase is not configured.'); setLoading(false); return }
@@ -252,43 +237,32 @@ export function AcademicsPage({ role, userId }: Props) {
 
       const studentResult = role === 'student'
         ? await supabase.from('college_students')
-          .select('student_status,programme:college_programmes(department_id,department:college_departments(id,code,name))')
+          .select('student_status,department_id,department:college_departments(id,code,name)')
           .eq('id', userId)
           .maybeSingle()
         : null
       if (studentResult?.error) throw studentResult.error
 
-      const [departmentResult, courseResult, offeringResult, enrollmentResult, programmeResult, mappingResult] = await Promise.all([
+      const [departmentResult, courseResult, offeringResult, enrollmentResult] = await Promise.all([
         supabase.from('college_departments').select('id,code,name').eq('is_active', true).order('name'),
         supabase.from('college_courses').select('id,code,name,department_id,credit_hours,is_active').order('code'),
         supabase.from('college_course_offerings').select('id,academic_year,term,section,lecturer_id,student_selection_open,course:college_courses(id,code,name,department_id,is_active)').order('academic_year', { ascending: false }),
         role === 'student'
           ? supabase.from('college_enrollments').select('course_offering_id,enrollment_status').eq('student_id', userId)
           : Promise.resolve({ data: [], error: null }),
-        canManage
-          ? supabase.from('college_programmes').select('id,code,name,department_id,duration_years').eq('is_active', true).order('name')
-          : Promise.resolve({ data: [], error: null }),
-        canManage
-          ? supabase.from('college_programme_year_offerings').select('id,study_year,programme:college_programmes(code,name),offering:college_course_offerings(academic_year,term,section,course:college_courses(code,name))').order('study_year')
-          : Promise.resolve({ data: [], error: null }),
       ])
       if (departmentResult.error) throw departmentResult.error
       if (courseResult.error) throw courseResult.error
       if (offeringResult.error) throw offeringResult.error
       if (enrollmentResult.error) throw enrollmentResult.error
-      if (programmeResult.error) throw programmeResult.error
-      if (mappingResult.error) throw mappingResult.error
       const allOfferings = (offeringResult.data ?? []) as Offering[]
       const studentRecord = studentResult?.data as {
         student_status: string
-        programme: Related<{
-          department_id: string
-          department: Related<Department>
-        }>
+        department_id: string
+        department: Related<Department>
       } | null
-      const studentProgramme = related(studentRecord?.programme)
-      const studentDepartment = related(studentProgramme?.department) ?? null
-      const studentDepartmentId = studentDepartment?.id ?? studentProgramme?.department_id
+      const studentDepartment = related(studentRecord?.department) ?? null
+      const studentDepartmentId = studentRecord?.department_id
       const enrolledOfferingIds = new Set((enrollmentResult.data ?? [])
         .filter((enrollment) => enrollment.enrollment_status === 'enrolled')
         .map((enrollment) => enrollment.course_offering_id))
@@ -329,8 +303,6 @@ export function AcademicsPage({ role, userId }: Props) {
           : (courseResult.data ?? []).filter((course) => offeringCourseIds.has(course.id)))
       setOfferings(visibleOfferings)
       setAvailableStudentOfferings(availableStudentOfferings)
-      setProgrammes(programmeResult.data ?? [])
-      setProgrammeYearOfferings((mappingResult.data ?? []) as ProgrammeYearOffering[])
       if (canManage) {
         const staffResult = await supabase.from('college_staff').select('id,staff_number').eq('employment_status', 'active').order('staff_number')
         if (staffResult.error) throw staffResult.error
@@ -416,35 +388,6 @@ export function AcademicsPage({ role, userId }: Props) {
     await load()
   }
 
-  async function mapOfferingToProgrammeYear(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!supabase || !canManage) return
-    setBusy(true); setError(''); setSuccess('')
-    const { error: insertError } = await supabase.from('college_programme_year_offerings').insert({
-      programme_id: mappingForm.programme_id,
-      study_year: Number(mappingForm.study_year),
-      course_offering_id: mappingForm.course_offering_id,
-    })
-    setBusy(false)
-    if (insertError) { setError(insertError.message); return }
-    setMappingForm({ ...mappingForm, course_offering_id: '' })
-    setSuccess('Offering mapped. Matching active students have been enrolled automatically.')
-    await load()
-  }
-
-  async function removeProgrammeYearOffering(mappingId: string) {
-    if (!supabase || !canManage) return
-    setBusy(true); setError(''); setSuccess('')
-    const { error: deleteError } = await supabase
-      .from('college_programme_year_offerings')
-      .delete()
-      .eq('id', mappingId)
-    setBusy(false)
-    if (deleteError) { setError(deleteError.message); return }
-    setSuccess('Mapping removed. Students are no longer enrolled in offerings that are not mapped to their programme year.')
-    await load()
-  }
-
   async function toggleCourse(course: Course) {
     if (!supabase || !canManage) return
     setBusy(true); setError(''); setSuccess('')
@@ -494,33 +437,11 @@ export function AcademicsPage({ role, userId }: Props) {
           </Panel>
         </div>
       )}
-      {canManage && (
-        <Panel title="Map offerings to programme year">
-          <p className="mb-4 text-xs text-slate-500">Each mapped offering is automatically assigned to active students in that programme and year. New admissions and year updates also synchronize matching enrollments.</p>
-          <form className="grid gap-3 sm:grid-cols-4" onSubmit={mapOfferingToProgrammeYear}>
-            <Field label="Programme"><SelectInput onChange={(event) => setMappingForm({ ...mappingForm, programme_id: event.target.value })} required value={mappingForm.programme_id}><option value="">Select programme</option>{programmes.map((programme) => <option key={programme.id} value={programme.id}>{programme.code} · {programme.name}</option>)}</SelectInput></Field>
-            <Field label="Year of study"><TextInput max={programmes.find((programme) => programme.id === mappingForm.programme_id)?.duration_years ?? undefined} min="1" onChange={(event) => setMappingForm({ ...mappingForm, study_year: event.target.value })} required type="number" value={mappingForm.study_year} /></Field>
-            <Field label="Course offering"><SelectInput onChange={(event) => setMappingForm({ ...mappingForm, course_offering_id: event.target.value })} required value={mappingForm.course_offering_id}><option value="">Select offering</option>{offerings.map((offering) => <option key={offering.id} value={offering.id}>{related(offering.course)?.code} · {offering.academic_year} · Term {offering.term} · {offering.section}</option>)}</SelectInput></Field>
-            <button className="primary-button self-end" disabled={busy || !programmes.length || !offerings.length} type="submit"><Plus size={14} /> Map offering</button>
-          </form>
-          <div className="mt-5">
-            {programmeYearOfferings.length ? (
-              <Table headers={['Programme', 'Year', 'Offering', 'Action']}>
-                {programmeYearOfferings.map((mapping) => {
-                  const offering = related(mapping.offering)
-                  const course = related(offering?.course)
-                  return <Row key={mapping.id}><Cell>{related(mapping.programme)?.code} · {related(mapping.programme)?.name}</Cell><Cell>{mapping.study_year}</Cell><Cell>{course?.code} · {course?.name} · {offering?.academic_year} · Term {offering?.term} · {offering?.section}</Cell><Cell><button className="text-rose-700 dark:text-rose-300" disabled={busy} onClick={() => void removeProgrammeYearOffering(mapping.id)} type="button">Remove</button></Cell></Row>
-                })}
-              </Table>
-            ) : <Empty>No programme-year offerings are mapped yet.</Empty>}
-          </div>
-        </Panel>
-      )}
       {role === 'student' && (
         <Panel title="My department">
           {studentDepartment
             ? <p className="text-sm font-semibold">{studentDepartment.code} · {studentDepartment.name}</p>
-            : <Empty>No department is assigned to your programme yet. Contact the registrar.</Empty>}
+            : <Empty>No department is assigned to your account yet. Contact the registrar.</Empty>}
         </Panel>
       )}
       {loading ? <Loading /> : (
@@ -535,7 +456,7 @@ export function AcademicsPage({ role, userId }: Props) {
       )}
       {role === 'student' && (
         <Panel title={`Open course offerings (${availableStudentOfferings.length})`}>
-          <p className="mb-4 text-xs text-slate-500">Select an offering published by the college in your programme department. Selection immediately enrolls you, and its timetable becomes visible in the Timetable page.</p>
+          <p className="mb-4 text-xs text-slate-500">Select an offering published by the college in your department. Selection immediately enrolls you, and its timetable becomes visible in the Timetable page.</p>
           {availableStudentOfferings.length ? (
             <Table headers={['Subject', 'Academic year', 'Term', 'Section', 'Action']}>
               {availableStudentOfferings.map((offering) => <Row key={offering.id}>
@@ -1164,9 +1085,9 @@ export function ReportsPage({ role }: Props) {
         if (queryError) throw queryError
         nextRows = (data ?? []).map((row) => ({ student_id: row.student_id, book_id: row.book_id, checked_out_at: row.checked_out_at, due_at: row.due_at, returned_at: row.returned_at }))
       } else if (report === 'students' && canReadStudents) {
-        const { data, error: queryError } = await supabase.from('college_students').select('student_number,student_status,programme_id,admitted_on').limit(500)
+        const { data, error: queryError } = await supabase.from('college_students').select('student_number,student_status,department_id,admitted_on').limit(500)
         if (queryError) throw queryError
-        nextRows = (data ?? []).map((row) => ({ student_number: row.student_number, status: row.student_status, programme_id: row.programme_id, admitted_on: row.admitted_on }))
+        nextRows = (data ?? []).map((row) => ({ student_number: row.student_number, status: row.student_status, department_id: row.department_id, admitted_on: row.admitted_on }))
       } else {
         throw new Error('Your role is not permitted to view this report.')
       }

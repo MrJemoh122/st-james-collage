@@ -35,7 +35,6 @@ import { CreateAccount } from './features/account'
 import {
   ApplicantPortal,
   DepartmentsPage,
-  ProgrammesPage,
   RegistrationReviewPage,
   registrationAdminRoles,
   StaffPage,
@@ -61,9 +60,8 @@ const modules = [
   { name: 'Students', description: 'Student records and registration', icon: GraduationCap },
   { name: 'Staff', description: 'Staff profiles and departments', icon: Users },
   { name: 'Departments', description: 'Academic department management', icon: Building2 },
-  { name: 'Programmes', description: 'Programme setup and admissions', icon: BookOpen },
   { name: 'Registrations', description: 'Review student and staff applications', icon: ClipboardList },
-  { name: 'Academics', description: 'Courses, programmes and classes', icon: BookOpen },
+  { name: 'Academics', description: 'Subjects, courses and classes', icon: BookOpen },
   { name: 'Attendance', description: 'Class attendance and QR check-in', icon: ClipboardCheck },
   { name: 'Examinations', description: 'Exams, assessments and results', icon: FileCheck2 },
   { name: 'Finance', description: 'Fees, payments and balances', icon: CreditCard },
@@ -77,7 +75,7 @@ const moduleAccess: Record<CollegeRole, string[]> = {
   super_admin: modules.map((module) => module.name),
   college_admin: modules.map((module) => module.name),
   academic_registrar: modules.map((module) => module.name),
-  department_head: ['Overview', 'Staff', 'Departments', 'Programmes', 'Academics', 'Examinations', 'Timetable', 'Reports'],
+  department_head: ['Overview', 'Staff', 'Departments', 'Academics', 'Examinations', 'Timetable', 'Reports'],
   lecturer: ['Overview', 'Academics', 'Attendance', 'Examinations', 'Timetable'],
   student: ['Overview', 'Academics', 'Attendance', 'Examinations', 'Finance', 'Library', 'Timetable'],
   finance_accountant: ['Overview', 'Finance', 'Reports'],
@@ -88,7 +86,7 @@ const moduleAccess: Record<CollegeRole, string[]> = {
 }
 
 const summary = [
-  { label: 'Total students', detail: 'Across all programmes', icon: GraduationCap },
+  { label: 'Total students', detail: 'Across all departments', icon: GraduationCap },
   { label: 'Active staff', detail: 'Teaching and administration', icon: Users },
   { label: 'Attendance today', detail: 'Sessions scheduled today', icon: ClipboardCheck },
   { label: 'Fees collected', detail: 'Confirmed payments · TZS', icon: CreditCard },
@@ -479,8 +477,6 @@ function App() {
             <StaffPage role={role!} />
           ) : page === 'Departments' ? (
             <DepartmentsPage canManage={canManageDepartments} canDelete={canDeleteDepartments} role={role!} userId={user.id} />
-          ) : page === 'Programmes' ? (
-            <ProgrammesPage canManage={canManageDepartments} />
           ) : page === 'Registrations' ? (
             <RegistrationReviewPage />
           ) : page === 'Attendance' ? (
@@ -870,7 +866,7 @@ function StudentOverview({
     photo_path: string | null
     photoUrl: string | null
     profile: { full_name: string; email: string | null } | Array<{ full_name: string; email: string | null }> | null
-    programme: { code: string; name: string } | Array<{ code: string; name: string }> | null
+    department: { code: string; name: string } | Array<{ code: string; name: string }> | null
   } | null>(null)
 
   useEffect(() => {
@@ -887,7 +883,7 @@ function StudentOverview({
         const [studentResult, enrollmentResult] = await Promise.all([
           supabase
             .from('college_students')
-            .select('student_number,student_status,study_year,photo_path,profile:college_profiles(full_name,email),programme:college_programmes(code,name)')
+            .select('student_number,student_status,study_year,photo_path,profile:college_profiles(full_name,email),department:college_departments(code,name)')
             .eq('id', userId)
             .maybeSingle(),
           supabase
@@ -989,8 +985,8 @@ function StudentOverview({
   const attendancePercent = attendance && attendance.completed > 0
     ? Math.round((attendance.attended / attendance.completed) * 100)
     : null
-  const studentProgramme = studentProfile
-    ? Array.isArray(studentProfile.programme) ? studentProfile.programme[0] : studentProfile.programme
+  const studentDepartment = studentProfile
+    ? Array.isArray(studentProfile.department) ? studentProfile.department[0] : studentProfile.department
     : null
   const studentIdentity = studentProfile
     ? Array.isArray(studentProfile.profile) ? studentProfile.profile[0] : studentProfile.profile
@@ -1013,9 +1009,9 @@ function StudentOverview({
             <p className="text-lg font-bold">{studentIdentity?.full_name ?? 'Student profile'}</p>
             <p className="mt-1 text-xs font-semibold text-indigo-700 dark:text-indigo-300">{studentProfile.student_number} · {studentProfile.student_status.replaceAll('_', ' ')}</p>
             <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">
-              {studentProgramme ? `${studentProgramme.code} · ${studentProgramme.name}` : 'Programme not set'} · {studentProfile.study_year ? `Year ${studentProfile.study_year}` : 'Study year not set'}
+              {studentDepartment ? `${studentDepartment.code} · ${studentDepartment.name}` : 'Department not set'} · {studentProfile.study_year ? `Year ${studentProfile.study_year}` : 'Study year not set'}
             </p>
-            {subjects.length === 0 && <p className="mt-3 text-xs text-slate-600 dark:text-slate-400">No course offerings are linked yet. Ask the registrar to assign your study year and map the programme year to current offerings.</p>}
+            {subjects.length === 0 && <p className="mt-3 text-xs text-slate-600 dark:text-slate-400">No course offerings are linked yet. Select an open course offering from Academics or contact the registrar.</p>}
           </section>
           <section aria-label="Student profile photo" className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900 sm:w-56 sm:flex-col sm:justify-center sm:p-4">
             {studentProfile.photoUrl
