@@ -220,6 +220,7 @@ function downloadCsv(filename: string, rows: Array<Record<string, string | numbe
 export function AcademicsPage({ role, userId }: Props) {
   const canManage = academicAdminRoles.includes(role) || role === 'department_head'
   const [departments, setDepartments] = useState<Department[]>([])
+  const [studentDepartment, setStudentDepartment] = useState<Department | null>(null)
   const [courses, setCourses] = useState<Course[]>([])
   const [offerings, setOfferings] = useState<Offering[]>([])
   const [availableStudentOfferings, setAvailableStudentOfferings] = useState<Offering[]>([])
@@ -251,7 +252,7 @@ export function AcademicsPage({ role, userId }: Props) {
 
       const studentResult = role === 'student'
         ? await supabase.from('college_students')
-          .select('student_status,programme:college_programmes(department_id)')
+          .select('student_status,programme:college_programmes(department_id,department:college_departments(id,code,name))')
           .eq('id', userId)
           .maybeSingle()
         : null
@@ -280,9 +281,14 @@ export function AcademicsPage({ role, userId }: Props) {
       const allOfferings = (offeringResult.data ?? []) as Offering[]
       const studentRecord = studentResult?.data as {
         student_status: string
-        programme: Related<{ department_id: string }>
+        programme: Related<{
+          department_id: string
+          department: Related<Department>
+        }>
       } | null
-      const studentDepartmentId = related(studentRecord?.programme)?.department_id
+      const studentProgramme = related(studentRecord?.programme)
+      const studentDepartment = related(studentProgramme?.department) ?? null
+      const studentDepartmentId = studentDepartment?.id ?? studentProgramme?.department_id
       const enrolledOfferingIds = new Set((enrollmentResult.data ?? [])
         .filter((enrollment) => enrollment.enrollment_status === 'enrolled')
         .map((enrollment) => enrollment.course_offering_id))
@@ -312,12 +318,15 @@ export function AcademicsPage({ role, userId }: Props) {
         ? (departmentResult.data ?? []).filter((department) => department.id === ownDepartmentId)
         : (departmentResult.data ?? [])
       setDepartments(visibleDepartments)
+      setStudentDepartment(role === 'student' ? studentDepartment : null)
       setCourses(canManage
         ? (courseResult.data ?? []).filter((course) =>
             role !== 'department_head'
             || !ownDepartmentId
             || course.department_id === ownDepartmentId)
-        : (courseResult.data ?? []).filter((course) => offeringCourseIds.has(course.id)))
+        : role === 'student' && studentDepartmentId
+          ? (courseResult.data ?? []).filter((course) => course.is_active && course.department_id === studentDepartmentId)
+          : (courseResult.data ?? []).filter((course) => offeringCourseIds.has(course.id)))
       setOfferings(visibleOfferings)
       setAvailableStudentOfferings(availableStudentOfferings)
       setProgrammes(programmeResult.data ?? [])
@@ -507,10 +516,17 @@ export function AcademicsPage({ role, userId }: Props) {
           </div>
         </Panel>
       )}
+      {role === 'student' && (
+        <Panel title="My department">
+          {studentDepartment
+            ? <p className="text-sm font-semibold">{studentDepartment.code} · {studentDepartment.name}</p>
+            : <Empty>No department is assigned to your programme yet. Contact the registrar.</Empty>}
+        </Panel>
+      )}
       {loading ? <Loading /> : (
         <div className="grid gap-5 xl:grid-cols-2">
-          <Panel title={`Subjects (${courses.length})`}>
-            {courses.length ? <Table headers={['Code', 'Subject', 'Department', 'Credits', 'Status', ...(canManage ? ['Action'] : [])]}>{courses.map((course) => <Row key={course.id}><Cell>{course.code}</Cell><Cell>{course.name}</Cell><Cell>{departments.find((department) => department.id === course.department_id)?.code ?? '—'}</Cell><Cell>{course.credit_hours}</Cell><Cell>{course.is_active ? 'Active' : 'Inactive'}</Cell>{canManage && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void toggleCourse(course)} type="button">{course.is_active ? 'Deactivate' : 'Activate'}</button></Cell>}</Row>)}</Table> : <Empty>No subjects are recorded.</Empty>}
+          <Panel title={role === 'student' ? `Subjects in my department (${courses.length})` : `Subjects (${courses.length})`}>
+            {courses.length ? <Table headers={['Code', 'Subject', 'Department', 'Credits', 'Status', ...(canManage ? ['Action'] : [])]}>{courses.map((course) => <Row key={course.id}><Cell>{course.code}</Cell><Cell>{course.name}</Cell><Cell>{departments.find((department) => department.id === course.department_id)?.code ?? studentDepartment?.code ?? '—'}</Cell><Cell>{course.credit_hours}</Cell><Cell>{course.is_active ? 'Active' : 'Inactive'}</Cell>{canManage && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void toggleCourse(course)} type="button">{course.is_active ? 'Deactivate' : 'Activate'}</button></Cell>}</Row>)}</Table> : <Empty>{role === 'student' ? 'No active subjects are registered for your department yet.' : 'No subjects are recorded.'}</Empty>}
           </Panel>
           <Panel title={`${role === 'student' ? 'My enrolled offerings' : 'Course offerings'} (${offerings.length})`}>
             {offerings.length ? <Table headers={['Subject', 'Academic year', 'Term', 'Section', 'Lecturer', ...(canManage ? ['Course selection'] : role === 'lecturer' ? ['Roster'] : [])]}>{offerings.map((offering) => <Row key={offering.id}><Cell>{related(offering.course)?.code ?? '—'} · {related(offering.course)?.name ?? ''}</Cell><Cell>{offering.academic_year}</Cell><Cell>{offering.term}</Cell><Cell>{offering.section}</Cell><Cell>{offering.lecturer_id ? staff.find((member) => member.id === offering.lecturer_id)?.staff_number ?? 'Assigned' : 'Unassigned'}</Cell>{canManage && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void toggleStudentSelection(offering)} type="button">{offering.student_selection_open ? 'Close selection' : 'Open selection'}</button></Cell>}{role === 'lecturer' && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={rosterLoading} onClick={() => void loadLecturerRoster(offering)} type="button">{selectedRosterOfferingId === offering.id && rosterLoading ? 'Loading…' : 'View students'}</button></Cell>}</Row>)}</Table> : <Empty>{role === 'student' ? 'You are not enrolled in any course offerings yet.' : 'No course offerings are recorded.'}</Empty>}

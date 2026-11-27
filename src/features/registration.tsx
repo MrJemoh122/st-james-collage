@@ -50,7 +50,14 @@ type StudentDirectoryEntry = {
   photo_path: string | null
   photoUrl?: string
   profile: Related<{ full_name: string | null; email: string | null }>
-  programme: Related<{ id: string; name: string; code: string; duration_years: number | null }>
+  programme: Related<{
+    id: string
+    name: string
+    code: string
+    duration_years: number | null
+    department_id: string
+    department: Related<{ id: string; code: string; name: string }>
+  }>
 }
 type StaffDirectoryEntry = {
   id: string
@@ -972,7 +979,12 @@ export function RegistrationReviewPage() {
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState('')
   const [savingPlacementId, setSavingPlacementId] = useState('')
-  const [placementDrafts, setPlacementDrafts] = useState<Record<string, { programmeId: string; studyYear: string }>>({})
+  const [placementDrafts, setPlacementDrafts] = useState<Record<string, {
+    departmentId: string
+    programmeId: string
+    studyYear: string
+  }>>({})
+  const [departments, setDepartments] = useState<Department[]>([])
   const [programmes, setProgrammes] = useState<Programme[]>([])
   const [message, setMessage] = useState('')
   const [isError, setIsError] = useState(false)
@@ -981,7 +993,7 @@ export function RegistrationReviewPage() {
     const client = supabase
     if (!client) return
     setLoading(true)
-    const [studentResult, staffResult, programmeResult] = await Promise.all([
+    const [studentResult, staffResult, programmeResult, departmentResult] = await Promise.all([
       client
         .from('college_student_applications')
         .select('*, department:college_departments(id,code,name), programme:college_programmes(id,code,name,duration_years), course_choices:college_student_application_course_choices(offering:college_course_offerings(academic_year,term,section,course:college_courses(code,name))), documents:college_student_application_documents(id,document_type,original_name,storage_path)')
@@ -993,8 +1005,9 @@ export function RegistrationReviewPage() {
         .eq('application_status', 'pending')
         .order('submitted_at'),
       client.from('college_programmes').select('id,code,name,duration_years,department_id').eq('is_active', true).order('name'),
+      client.from('college_departments').select('id,code,name,is_active').eq('is_active', true).order('name'),
     ])
-    const error = studentResult.error ?? staffResult.error ?? programmeResult.error
+    const error = studentResult.error ?? staffResult.error ?? programmeResult.error ?? departmentResult.error
     if (error) {
       setIsError(true)
       setMessage(error.message)
@@ -1024,6 +1037,7 @@ export function RegistrationReviewPage() {
       setStudents(signedStudents as StudentApplication[])
       setStaff(signedStaff as StaffApplication[])
       setProgrammes(programmeResult.data ?? [])
+      setDepartments(departmentResult.data ?? [])
       setIsError(false)
       setMessage('')
     } catch (error) {
@@ -1045,12 +1059,34 @@ export function RegistrationReviewPage() {
     const application = students.find((item) => item.id === id)
     const draft = application ? placementDrafts[id] : undefined
     const programmeId = draft?.programmeId || application?.programme?.id || ''
+    const departmentId = draft?.departmentId || application?.department_id || application?.department?.id || ''
     const studyYear = Number(draft?.studyYear || application?.study_year || 0)
-    if (kind === 'student' && (!programmeId || !Number.isInteger(studyYear) || studyYear < 1)) {
+    const programme = programmes.find((item) => item.id === programmeId)
+    if (kind === 'student' && (
+      !departmentId
+      || !programmeId
+      || programme?.department_id !== departmentId
+      || !Number.isInteger(studyYear)
+      || studyYear < 1
+    )) {
       setBusyId('')
       setIsError(true)
-      setMessage('Assign a programme and valid year of study before approving this student.')
+      setMessage('Assign a department, a programme in that department, and a valid year of study before approving this student.')
       return
+    }
+    if (kind === 'student') {
+      const { error: placementError } = await supabase.rpc('set_college_student_application_department_placement', {
+        p_application_id: id,
+        p_department_id: departmentId,
+        p_programme_id: programmeId,
+        p_study_year: studyYear,
+      })
+      if (placementError) {
+        setBusyId('')
+        setIsError(true)
+        setMessage(placementError.message)
+        return
+      }
     }
     const result = kind === 'student'
       ? await supabase.rpc('approve_college_student_application_with_courses', {
@@ -1073,20 +1109,29 @@ export function RegistrationReviewPage() {
   async function saveApplicationPlacement(application: StudentApplication) {
     if (!supabase) return
     const draft = placementDrafts[application.id] ?? {
+      departmentId: application.department_id ?? application.department?.id ?? '',
       programmeId: application.programme?.id ?? '',
       studyYear: application.study_year?.toString() ?? '',
     }
     const studyYear = Number(draft?.studyYear)
-    if (!draft?.programmeId || !Number.isInteger(studyYear) || studyYear < 1) {
+    const programme = programmes.find((item) => item.id === draft.programmeId)
+    if (
+      !draft?.departmentId
+      || !draft.programmeId
+      || programme?.department_id !== draft.departmentId
+      || !Number.isInteger(studyYear)
+      || studyYear < 1
+    ) {
       setIsError(true)
-      setMessage("Choose a programme in the student's selected department and enter a valid year of study.")
+      setMessage("Choose a department, a programme in that department, and a valid year of study.")
       return
     }
 
     setSavingPlacementId(application.id)
     setMessage('')
-    const { error } = await supabase.rpc('set_college_student_application_placement', {
+    const { error } = await supabase.rpc('set_college_student_application_department_placement', {
       p_application_id: application.id,
+      p_department_id: draft.departmentId,
       p_programme_id: draft.programmeId,
       p_study_year: studyYear,
     })
@@ -1097,15 +1142,18 @@ export function RegistrationReviewPage() {
       return
     }
 
-    const availableProgrammes = programmes.filter((item) =>
-      !application.department_id || item.department_id === application.department_id,
-    )
-    const programme = availableProgrammes.find((item) => item.id === draft.programmeId)
+    const selectedDepartment = departments.find((item) => item.id === draft.departmentId)
     setStudents((current) => current.map((item) => item.id === application.id
-      ? { ...item, study_year: studyYear, programme: programme ?? item.programme }
+      ? {
+          ...item,
+          department_id: draft.departmentId,
+          department: selectedDepartment ?? item.department,
+          study_year: studyYear,
+          programme: programme ?? item.programme,
+        }
       : item))
     setIsError(false)
-    setMessage(`Programme and year saved for ${application.full_name}.`)
+    setMessage(`Department, programme, and year saved for ${application.full_name}.`)
   }
 
   return (
@@ -1114,7 +1162,7 @@ export function RegistrationReviewPage() {
         <div>
           <p className="text-xs font-medium text-slate-500">Registrar workspace</p>
           <h2 className="mt-1 text-2xl font-bold tracking-tight">Registration review</h2>
-          <p className="mt-2 text-sm text-slate-500">Review student details, assign programme and year, confirm requested courses, and approve admission.</p>
+          <p className="mt-2 text-sm text-slate-500">Review student details, assign department, programme and year, confirm requested courses, and approve admission.</p>
         </div>
         <button className="secondary-button w-fit" onClick={() => void loadApplications()}><RefreshCw size={14} /> Refresh</button>
       </div>
@@ -1124,12 +1172,11 @@ export function RegistrationReviewPage() {
           {!students.length && !staff.length && <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900">No applications awaiting review.</div>}
           {students.map((application) => {
             const draft = placementDrafts[application.id] ?? {
+              departmentId: application.department_id ?? application.department?.id ?? '',
               programmeId: application.programme?.id ?? '',
               studyYear: application.study_year?.toString() ?? '',
             }
-            const availableProgrammes = programmes.filter((item) =>
-              !application.department_id || item.department_id === application.department_id,
-            )
+            const availableProgrammes = programmes.filter((item) => item.department_id === draft.departmentId)
             const programme = availableProgrammes.find((item) => item.id === draft.programmeId)
             const choices = (application.course_choices ?? []).map((choice) => {
               const offering = relationValue(choice.offering)
@@ -1138,7 +1185,7 @@ export function RegistrationReviewPage() {
                 ? `${course.code} · ${course.name} · ${offering?.academic_year ?? ''} · Term ${offering?.term ?? ''} · ${offering?.section ?? ''}`
                 : ''
             }).filter(Boolean)
-            const canApprove = Boolean(programme && Number.isInteger(Number(draft.studyYear)) && Number(draft.studyYear) > 0)
+            const canApprove = Boolean(draft.departmentId && programme && Number.isInteger(Number(draft.studyYear)) && Number(draft.studyYear) > 0)
             return <ApplicationCard
               key={application.id}
               title="Student admission"
@@ -1156,12 +1203,22 @@ export function RegistrationReviewPage() {
               canApprove={canApprove}
               extra={
                 <form
-                  className="mt-4 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-[minmax(0,1fr)_160px_auto] sm:items-end dark:border-slate-800"
+                  className="mt-4 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_140px_auto] sm:items-end dark:border-slate-800"
                   onSubmit={(event) => {
                     event.preventDefault()
                     void saveApplicationPlacement(application)
                   }}
                 >
+                  <label className="block text-[11px] font-semibold">
+                    Assign department
+                    <select className="form-input mt-1" onChange={(event) => setPlacementDrafts({
+                      ...placementDrafts,
+                      [application.id]: { ...draft, departmentId: event.target.value, programmeId: '', studyYear: '' },
+                    })} required value={draft.departmentId}>
+                      <option value="">Choose department</option>
+                      {departments.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}
+                    </select>
+                  </label>
                   <label className="block text-[11px] font-semibold">
                     Assign programme
                     <select className="form-input mt-1" onChange={(event) => setPlacementDrafts({
@@ -1182,6 +1239,7 @@ export function RegistrationReviewPage() {
                   <button className="secondary-button h-10 justify-center" disabled={savingPlacementId === application.id} type="submit">
                     {savingPlacementId === application.id ? 'Saving…' : 'Save placement'}
                   </button>
+                  <p className="text-[11px] text-slate-500 sm:col-span-4">The assigned department must match the department of the requested course offerings.</p>
                 </form>
               }
               onApprove={() => void approve('student', application.id)}
@@ -1293,12 +1351,14 @@ function ApplicationCard({
 
 export function StudentsPage({ canManage }: { canManage: boolean }) {
   const [students, setStudents] = useState<StudentDirectoryEntry[]>([])
+  const [activeDepartments, setActiveDepartments] = useState<Department[]>([])
   const [activeProgrammes, setActiveProgrammes] = useState<Programme[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [isError, setIsError] = useState(false)
   const [transferringStudent, setTransferringStudent] = useState('')
+  const [transferDepartmentId, setTransferDepartmentId] = useState('')
   const [transferProgrammeId, setTransferProgrammeId] = useState('')
   const [transferReason, setTransferReason] = useState('')
   const [editingStudyYearStudentId, setEditingStudyYearStudentId] = useState('')
@@ -1310,17 +1370,20 @@ export function StudentsPage({ canManage }: { canManage: boolean }) {
     async function load() {
       const client = supabase
       if (!client) return
-      const [studentResult, programmeResult] = await Promise.all([
+      const [studentResult, programmeResult, departmentResult] = await Promise.all([
         client
           .from('college_students')
-          .select('id,student_number,student_status,study_year,admitted_on,phone,photo_path,profile:college_profiles!college_students_id_fkey(full_name,email),programme:college_programmes(id,name,code,duration_years)')
+          .select('id,student_number,student_status,study_year,admitted_on,phone,photo_path,profile:college_profiles!college_students_id_fkey(full_name,email),programme:college_programmes(id,name,code,duration_years,department_id,department:college_departments(id,code,name))')
           .order('student_number'),
         canManage
-          ? client.from('college_programmes').select('id,code,name,duration_years').eq('is_active', true).order('name')
+          ? client.from('college_programmes').select('id,code,name,duration_years,department_id').eq('is_active', true).order('name')
+          : Promise.resolve({ data: [], error: null }),
+        canManage
+          ? client.from('college_departments').select('id,code,name,is_active').eq('is_active', true).order('name')
           : Promise.resolve({ data: [], error: null }),
       ])
       if (!active) return
-      const queryError = studentResult.error ?? programmeResult.error
+      const queryError = studentResult.error ?? programmeResult.error ?? departmentResult.error
       if (queryError) {
         setError(queryError.message)
       } else {
@@ -1335,6 +1398,7 @@ export function StudentsPage({ canManage }: { canManage: boolean }) {
           if (active) {
             setStudents(rows)
             setActiveProgrammes(programmeResult.data ?? [])
+            setActiveDepartments(departmentResult.data ?? [])
           }
         } catch (error) {
           if (active) setError(error instanceof Error ? error.message : 'Could not load student photos.')
@@ -1347,11 +1411,18 @@ export function StudentsPage({ canManage }: { canManage: boolean }) {
   }, [canManage])
 
   async function transferStudent(student: StudentDirectoryEntry) {
-    if (!supabase || !canManage || !transferProgrammeId || !transferReason.trim()) return
+    if (!supabase || !canManage || !transferDepartmentId || !transferProgrammeId || !transferReason.trim()) return
+    const nextProgramme = activeProgrammes.find((programme) => programme.id === transferProgrammeId)
+    if (!nextProgramme || nextProgramme.department_id !== transferDepartmentId) {
+      setIsError(true)
+      setMessage('Choose a programme that belongs to the selected department.')
+      return
+    }
     setBusy(true)
     setMessage('')
-    const { error: transferError } = await supabase.rpc('transfer_college_student_programme', {
+    const { error: transferError } = await supabase.rpc('transfer_college_student_department', {
       p_student_id: student.id,
+      p_department_id: transferDepartmentId,
       p_programme_id: transferProgrammeId,
       p_reason: transferReason.trim(),
     })
@@ -1361,15 +1432,24 @@ export function StudentsPage({ canManage }: { canManage: boolean }) {
       setMessage(transferError.message)
       return
     }
-    const nextProgramme = activeProgrammes.find((programme) => programme.id === transferProgrammeId)
-    if (nextProgramme) {
-      setStudents((current) => current.map((item) => item.id === student.id
-        ? { ...item, programme: { id: nextProgramme.id, name: nextProgramme.name, code: nextProgramme.code, duration_years: nextProgramme.duration_years } }
-        : item))
-    }
+    const nextDepartment = activeDepartments.find((department) => department.id === transferDepartmentId)
+    setStudents((current) => current.map((item) => item.id === student.id
+      ? {
+          ...item,
+          programme: {
+            id: nextProgramme.id,
+            name: nextProgramme.name,
+            code: nextProgramme.code,
+            duration_years: nextProgramme.duration_years,
+            department_id: nextProgramme.department_id ?? transferDepartmentId,
+            department: nextDepartment ?? null,
+          },
+        }
+      : item))
     setIsError(false)
     setMessage(`Course transfer recorded for ${student.student_number}. Their registration number is unchanged.`)
     setTransferringStudent('')
+    setTransferDepartmentId('')
     setTransferProgrammeId('')
     setTransferReason('')
   }
@@ -1422,7 +1502,7 @@ export function StudentsPage({ canManage }: { canManage: boolean }) {
                   {student.photoUrl ? <img alt="" className="h-10 w-10 rounded-full object-cover" src={student.photoUrl} /> : <span className="grid h-10 w-10 place-items-center rounded-full bg-slate-100 text-slate-400 dark:bg-slate-800"><UserRound size={17} /></span>}
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-xs font-semibold">{profile?.full_name ?? 'Student'}</p>
-                  <p className="mt-1 truncate text-[10px] text-slate-500">{student.student_number} · {programme?.code ?? ''} {programme?.name ?? 'Programme'} · {profile?.email ?? ''}</p>
+                  <p className="mt-1 truncate text-[10px] text-slate-500">{student.student_number} · {relationValue(programme?.department)?.code ?? 'Department not assigned'} · {programme?.code ?? ''} {programme?.name ?? 'Programme'} · {profile?.email ?? ''}</p>
                 </div>
                 <span className="hidden text-[10px] text-slate-500 sm:block">{student.study_year ? `Year ${student.study_year}` : 'Year not set'} · {student.student_status}</span>
                 {canManage && <button className="secondary-button justify-center" disabled={busy} onClick={() => {
@@ -1456,22 +1536,33 @@ export function StudentsPage({ canManage }: { canManage: boolean }) {
                   </form>
                 )}
                 {canManage && transferringStudent === student.id && (
-                  <form className="mt-4 grid gap-3 rounded-xl bg-slate-50 p-3 sm:grid-cols-[1fr_1fr_auto] dark:bg-slate-800/60" onSubmit={(event) => {
+                  <form className="mt-4 grid gap-3 rounded-xl bg-slate-50 p-3 sm:grid-cols-[1fr_1fr_1fr_auto] dark:bg-slate-800/60" onSubmit={(event) => {
                     event.preventDefault()
                     void transferStudent(student)
                   }}>
                     <label className="block text-[11px] font-semibold">
-                      New course
+                      New department
+                      <select className="form-input mt-1" required value={transferDepartmentId} onChange={(event) => {
+                        setTransferDepartmentId(event.target.value)
+                        setTransferProgrammeId('')
+                      }}>
+                        <option value="">Choose an active department</option>
+                        {activeDepartments.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}
+                      </select>
+                    </label>
+                    <label className="block text-[11px] font-semibold">
+                      New programme
                       <select className="form-input mt-1" required value={transferProgrammeId} onChange={(event) => setTransferProgrammeId(event.target.value)}>
-                        <option value="">Choose an active course</option>
-                        {activeProgrammes.filter((item) => item.id !== relationValue(student.programme)?.id).map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}
+                        <option value="">Choose an active programme</option>
+                        {activeProgrammes.filter((item) => item.department_id === transferDepartmentId && item.id !== relationValue(student.programme)?.id).map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}
                       </select>
                     </label>
                     <label className="block text-[11px] font-semibold">
                       Authorized transfer reason
                       <input className="form-input mt-1" maxLength={500} required value={transferReason} onChange={(event) => setTransferReason(event.target.value)} />
                     </label>
-                    <button className="primary-button h-10 justify-center self-end" disabled={busy} type="submit">{busy ? 'Saving…' : 'Record transfer'}</button>
+                    <button className="primary-button h-10 justify-center self-end" disabled={busy} type="submit">{busy ? 'Saving…' : 'Assign department'}</button>
+                    <p className="text-[11px] text-slate-500 sm:col-span-4">Programme-year offerings will synchronize automatically. Existing manually selected course enrollments are retained.</p>
                   </form>
                 )}
                 </div>
