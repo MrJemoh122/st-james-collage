@@ -31,13 +31,13 @@ export const registrationAdminRoles: CollegeRole[] = [
 
 type Props = { user: User; onRefresh?: () => void }
 type Department = { id: string; code: string; name: string; is_active: boolean }
-type Programme = { id: string; code: string; name: string; duration_years: number | null }
+type Programme = { id: string; code: string; name: string; duration_years: number | null; department_id?: string }
 type CourseOfferingChoice = {
   id: string
   academic_year: string
   term: number
   section: string
-  course: Related<{ code: string; name: string; is_active: boolean }>
+  course: Related<{ code: string; name: string; is_active: boolean; department_id: string }>
 }
 type ApplicationFile = { file: File; type: string }
 type Related<T> = T | T[] | null
@@ -297,6 +297,7 @@ export function ApplicantPortal({ user, onRefresh }: Props) {
 }
 
 function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: () => Promise<void> }) {
+  const [departments, setDepartments] = useState<Department[]>([])
   const [offerings, setOfferings] = useState<CourseOfferingChoice[]>([])
   const [loadError, setLoadError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -314,21 +315,35 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
     address: '',
     emergencyName: '',
     emergencyPhone: '',
+    departmentId: '',
     courseOfferingIds: [] as string[],
   })
 
   useEffect(() => {
     if (!supabase) return
-    supabase
-      .from('college_course_offerings')
-      .select('id,academic_year,term,section,course:college_courses(code,name,is_active)')
-      .eq('student_selection_open', true)
-      .order('academic_year', { ascending: false })
-      .order('term')
-      .then(({ data, error }) => {
-        if (error) setLoadError(error.message)
-        else setOfferings(((data ?? []) as CourseOfferingChoice[]).filter((offering) => relationValue(offering.course)?.is_active))
-      })
+    let active = true
+    void Promise.all([
+      supabase.from('college_departments').select('id,code,name,is_active').eq('is_active', true).order('name'),
+      supabase
+        .from('college_course_offerings')
+        .select('id,academic_year,term,section,course:college_courses(code,name,is_active,department_id)')
+        .eq('student_selection_open', true)
+        .order('academic_year', { ascending: false })
+        .order('term'),
+    ]).then(([departmentResult, offeringResult]) => {
+      if (!active) return
+      const error = departmentResult.error ?? offeringResult.error
+      if (error) {
+        setLoadError(error.message)
+        return
+      }
+      setDepartments(departmentResult.data ?? [])
+      setOfferings(((offeringResult.data ?? []) as CourseOfferingChoice[])
+        .filter((offering) => relationValue(offering.course)?.is_active))
+    }).catch((error: unknown) => {
+      if (active) setLoadError(error instanceof Error ? error.message : 'Could not load active departments and course offerings.')
+    })
+    return () => { active = false }
   }, [])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -336,8 +351,13 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
     setMessage('')
     setIsError(false)
     if (!supabase) return showError('Supabase is not configured.')
+    if (!form.departmentId) return showError('Choose a department.')
     if (!photo || !identity || !certificate) return showError('Add a photo, identity document, and academic certificate.')
     if (form.courseOfferingIds.length < 1) return showError('Choose at least one course offering.')
+    if (form.courseOfferingIds.some((id) => !offerings.some((offering) =>
+      offering.id === id && relationValue(offering.course)?.department_id === form.departmentId))) {
+      return showError('Choose course offerings from your selected department only.')
+    }
     if (otherDocuments.length > 6) return showError('You can upload up to six additional documents.')
     if (!isAllowedPhoto(photo)) return showError('Photo must be a JPEG, PNG, or WebP image no larger than 10 MB.')
     let photoSignatureMatches: boolean
@@ -378,7 +398,8 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
         uploadedDocuments.push({ path, name: document.file.name, type: document.type })
       }
 
-      const { error } = await supabase.rpc('submit_college_student_application_with_courses', {
+      const { error } = await supabase.rpc('submit_college_student_application_with_department_and_courses', {
+        p_department_id: form.departmentId,
         p_full_name: form.fullName,
         p_phone: form.phone,
         p_date_of_birth: form.dateOfBirth,
@@ -412,6 +433,10 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
 
   if (loadError) return <FormMessage error message={`Could not load course offerings: ${loadError}`} />
 
+  const departmentOfferings = offerings.filter((offering) =>
+    relationValue(offering.course)?.department_id === form.departmentId,
+  )
+
   return (
     <form className="space-y-5" onSubmit={submit}>
       <div className="grid gap-4 sm:grid-cols-2">
@@ -439,11 +464,21 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
         <Field label="Emergency contact phone" required>
           <input className="form-input" maxLength={30} required type="tel" value={form.emergencyPhone} onChange={(e) => setForm({ ...form, emergencyPhone: e.target.value })} />
         </Field>
+        <Field label="Department" required>
+          <select className="form-input" required value={form.departmentId} onChange={(e) => setForm({
+            ...form,
+            departmentId: e.target.value,
+            courseOfferingIds: [],
+          })}>
+            <option value="">Choose department</option>
+            {departments.map((department) => <option key={department.id} value={department.id}>{department.code} · {department.name}</option>)}
+          </select>
+        </Field>
       </div>
       <fieldset className="space-y-3">
         <legend className="text-xs font-semibold">Choose course offerings <span className="text-rose-500">*</span></legend>
-        <p className="text-[11px] leading-5 text-slate-500">Choose the courses, academic years, and terms you are applying to take. The registrar will assign your programme and confirm these enrolments before approval.</p>
-        {offerings.length ? <div className="grid gap-2 sm:grid-cols-2">{offerings.map((offering) => {
+        <p className="text-[11px] leading-5 text-slate-500">Choose open courses offered by your selected department. The registrar assigns your programme and year, then confirms your course enrolments.</p>
+        {departmentOfferings.length ? <div className="grid gap-2 sm:grid-cols-2">{departmentOfferings.map((offering) => {
           const course = relationValue(offering.course)
           const checked = form.courseOfferingIds.includes(offering.id)
           return <label className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 text-xs ${checked ? 'border-indigo-400 bg-indigo-50 dark:border-indigo-700 dark:bg-indigo-950/30' : 'border-slate-200 dark:border-slate-700'}`} key={offering.id}>
@@ -455,7 +490,7 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
             })} type="checkbox" />
             <span><span className="block font-semibold">{course?.code} · {course?.name}</span><span className="mt-1 block text-slate-500">{offering.academic_year} · Term {offering.term} · Section {offering.section}</span></span>
           </label>
-        })}</div> : <p className="rounded-xl border border-dashed border-slate-300 p-4 text-xs text-slate-500 dark:border-slate-700">No course offerings are currently open for application. Contact the registrar.</p>}
+        })}</div> : <p className="rounded-xl border border-dashed border-slate-300 p-4 text-xs text-slate-500 dark:border-slate-700">{form.departmentId ? 'No course offerings are currently open in this department. Contact the registrar.' : 'Choose a department to view its open course offerings.'}</p>}
       </fieldset>
       <Field label="Home address" required>
         <textarea className="form-input min-h-20 resize-y py-3" maxLength={500} required value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
@@ -481,10 +516,10 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
       </div>
       {loadError && <FormMessage error message={loadError} />}
       <FormMessage error={isError} message={message} />
-      <button className="primary-button h-11 w-full justify-center sm:w-auto" disabled={busy || offerings.length === 0} type="submit">
+      <button className="primary-button h-11 w-full justify-center sm:w-auto" disabled={busy || departments.length === 0 || departmentOfferings.length === 0} type="submit">
         {busy ? <><LoaderCircle className="animate-spin" size={16} /> Uploading application…</> : 'Submit student application'}
       </button>
-      {offerings.length === 0 && <p className="text-xs text-slate-500">Applications open when the registrar marks course offerings available.</p>}
+      {departments.length === 0 && <p className="text-xs text-slate-500">Applications open when an administrator activates a department.</p>}
     </form>
   )
 }
@@ -889,6 +924,7 @@ type ApplicationDocument = {
 
 type StudentApplication = {
   id: string
+  department_id: string | null
   full_name: string
   phone: string
   date_of_birth: string
@@ -899,6 +935,7 @@ type StudentApplication = {
   photo_path: string
   study_year: number | null
   submitted_at: string
+  department?: { id: string; code: string; name: string } | null
   programme?: { id: string; code: string; name: string; duration_years: number | null } | null
   course_choices?: Array<{
     offering: Related<{
@@ -947,7 +984,7 @@ export function RegistrationReviewPage() {
     const [studentResult, staffResult, programmeResult] = await Promise.all([
       client
         .from('college_student_applications')
-        .select('*, programme:college_programmes(id,code,name,duration_years), course_choices:college_student_application_course_choices(offering:college_course_offerings(academic_year,term,section,course:college_courses(code,name))), documents:college_student_application_documents(id,document_type,original_name,storage_path)')
+        .select('*, department:college_departments(id,code,name), programme:college_programmes(id,code,name,duration_years), course_choices:college_student_application_course_choices(offering:college_course_offerings(academic_year,term,section,course:college_courses(code,name))), documents:college_student_application_documents(id,document_type,original_name,storage_path)')
         .eq('application_status', 'pending')
         .order('submitted_at'),
       client
@@ -955,7 +992,7 @@ export function RegistrationReviewPage() {
         .select('*, department:college_departments(name), documents:college_staff_application_documents(id,document_type,original_name,storage_path)')
         .eq('application_status', 'pending')
         .order('submitted_at'),
-      client.from('college_programmes').select('id,code,name,duration_years').eq('is_active', true).order('name'),
+      client.from('college_programmes').select('id,code,name,duration_years,department_id').eq('is_active', true).order('name'),
     ])
     const error = studentResult.error ?? staffResult.error ?? programmeResult.error
     if (error) {
@@ -1042,7 +1079,7 @@ export function RegistrationReviewPage() {
     const studyYear = Number(draft?.studyYear)
     if (!draft?.programmeId || !Number.isInteger(studyYear) || studyYear < 1) {
       setIsError(true)
-      setMessage('Choose a programme and enter a valid year of study.')
+      setMessage("Choose a programme in the student's selected department and enter a valid year of study.")
       return
     }
 
@@ -1060,7 +1097,10 @@ export function RegistrationReviewPage() {
       return
     }
 
-    const programme = programmes.find((item) => item.id === draft.programmeId)
+    const availableProgrammes = programmes.filter((item) =>
+      !application.department_id || item.department_id === application.department_id,
+    )
+    const programme = availableProgrammes.find((item) => item.id === draft.programmeId)
     setStudents((current) => current.map((item) => item.id === application.id
       ? { ...item, study_year: studyYear, programme: programme ?? item.programme }
       : item))
@@ -1087,7 +1127,10 @@ export function RegistrationReviewPage() {
               programmeId: application.programme?.id ?? '',
               studyYear: application.study_year?.toString() ?? '',
             }
-            const programme = programmes.find((item) => item.id === draft.programmeId)
+            const availableProgrammes = programmes.filter((item) =>
+              !application.department_id || item.department_id === application.department_id,
+            )
+            const programme = availableProgrammes.find((item) => item.id === draft.programmeId)
             const choices = (application.course_choices ?? []).map((choice) => {
               const offering = relationValue(choice.offering)
               const course = relationValue(offering?.course)
@@ -1095,12 +1138,15 @@ export function RegistrationReviewPage() {
                 ? `${course.code} · ${course.name} · ${offering?.academic_year ?? ''} · Term ${offering?.term ?? ''} · ${offering?.section ?? ''}`
                 : ''
             }).filter(Boolean)
-            const canApprove = Boolean(draft.programmeId && Number.isInteger(Number(draft.studyYear)) && Number(draft.studyYear) > 0)
+            const canApprove = Boolean(programme && Number.isInteger(Number(draft.studyYear)) && Number(draft.studyYear) > 0)
             return <ApplicationCard
               key={application.id}
               title="Student admission"
               name={application.full_name}
-              subtitle={application.programme ? `${application.programme.code} ${application.programme.name}` : 'Programme not assigned'}
+              subtitle={[
+                application.department ? `${application.department.code} · ${application.department.name}` : 'Department not selected',
+                application.programme ? `${application.programme.code} ${application.programme.name}` : 'Programme not assigned',
+              ].join(' · ')}
               phone={application.phone}
               photoUrl={application.photoUrl}
               documents={application.documents ?? []}
@@ -1123,7 +1169,7 @@ export function RegistrationReviewPage() {
                       [application.id]: { ...draft, programmeId: event.target.value, studyYear: '' },
                     })} required value={draft.programmeId}>
                       <option value="">Choose programme</option>
-                      {programmes.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}
+                      {availableProgrammes.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}
                     </select>
                   </label>
                   <label className="block text-[11px] font-semibold">

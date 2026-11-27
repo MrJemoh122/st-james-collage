@@ -932,7 +932,12 @@ function StudentOverview({
           supabase.from('college_fee_charges').select('amount').eq('student_id', userId),
           supabase.from('college_payments').select('amount,payment_status').eq('student_id', userId),
         ])
-        if (slotResult.error) throw new Error(`Timetable: ${errorMessage(slotResult.error)}`)
+        if (slotResult.error) {
+          const timetableError = slotResult.error.message.includes('slot_status')
+            ? 'The timetable database is missing slot_status. Apply migration 20261127100000_fix_timetable_slot_status_and_student_scope.sql in Supabase, then retry.'
+            : errorMessage(slotResult.error)
+          throw new Error(`Timetable: ${timetableError}`)
+        }
         if (examResult.error) throw new Error(`Upcoming examinations: ${errorMessage(examResult.error)}`)
         if (resultResult.error) throw new Error(`Published results: ${errorMessage(resultResult.error)}`)
         if (sessionResult.error) throw new Error(`Attendance sessions: ${errorMessage(sessionResult.error)}`)

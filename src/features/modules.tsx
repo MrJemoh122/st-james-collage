@@ -18,9 +18,11 @@ type Offering = {
   lecturer_id: string | null
   student_selection_open?: boolean
   course: Related<Pick<Course, 'id' | 'code' | 'name' | 'department_id'> & {
+    is_active?: boolean
     department?: Related<Pick<Department, 'code' | 'name'>>
   }>
 }
+type LecturerCourseRosterRow = { student_number: string; full_name: string }
 type ProgrammeYearOffering = {
   id: string
   study_year: number
@@ -220,6 +222,7 @@ export function AcademicsPage({ role, userId }: Props) {
   const [departments, setDepartments] = useState<Department[]>([])
   const [courses, setCourses] = useState<Course[]>([])
   const [offerings, setOfferings] = useState<Offering[]>([])
+  const [availableStudentOfferings, setAvailableStudentOfferings] = useState<Offering[]>([])
   const [programmes, setProgrammes] = useState<Programme[]>([])
   const [programmeYearOfferings, setProgrammeYearOfferings] = useState<ProgrammeYearOffering[]>([])
   const [staff, setStaff] = useState<Staff[]>([])
@@ -227,6 +230,10 @@ export function AcademicsPage({ role, userId }: Props) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const [selectingOfferingId, setSelectingOfferingId] = useState('')
+  const [selectedRosterOfferingId, setSelectedRosterOfferingId] = useState('')
+  const [lecturerRoster, setLecturerRoster] = useState<LecturerCourseRosterRow[]>([])
+  const [rosterLoading, setRosterLoading] = useState(false)
   const [courseForm, setCourseForm] = useState({ department_id: '', code: '', name: '', credit_hours: '1' })
   const [offeringForm, setOfferingForm] = useState({ course_id: '', lecturer_id: '', academic_year: '', term: '1', section: 'A' })
   const [mappingForm, setMappingForm] = useState({ programme_id: '', study_year: '1', course_offering_id: '' })
@@ -242,12 +249,20 @@ export function AcademicsPage({ role, userId }: Props) {
       if (ownStaffResult.error) throw ownStaffResult.error
       const ownDepartmentId = ownStaffResult.data?.department_id ?? null
 
+      const studentResult = role === 'student'
+        ? await supabase.from('college_students')
+          .select('student_status,programme:college_programmes(department_id)')
+          .eq('id', userId)
+          .maybeSingle()
+        : null
+      if (studentResult?.error) throw studentResult.error
+
       const [departmentResult, courseResult, offeringResult, enrollmentResult, programmeResult, mappingResult] = await Promise.all([
         supabase.from('college_departments').select('id,code,name').eq('is_active', true).order('name'),
         supabase.from('college_courses').select('id,code,name,department_id,credit_hours,is_active').order('code'),
-        supabase.from('college_course_offerings').select('id,academic_year,term,section,lecturer_id,student_selection_open,course:college_courses(id,code,name,department_id)').order('academic_year', { ascending: false }),
+        supabase.from('college_course_offerings').select('id,academic_year,term,section,lecturer_id,student_selection_open,course:college_courses(id,code,name,department_id,is_active)').order('academic_year', { ascending: false }),
         role === 'student'
-          ? supabase.from('college_enrollments').select('course_offering_id').eq('student_id', userId).eq('enrollment_status', 'enrolled')
+          ? supabase.from('college_enrollments').select('course_offering_id,enrollment_status').eq('student_id', userId)
           : Promise.resolve({ data: [], error: null }),
         canManage
           ? supabase.from('college_programmes').select('id,code,name,department_id,duration_years').eq('is_active', true).order('name')
@@ -263,16 +278,35 @@ export function AcademicsPage({ role, userId }: Props) {
       if (programmeResult.error) throw programmeResult.error
       if (mappingResult.error) throw mappingResult.error
       const allOfferings = (offeringResult.data ?? []) as Offering[]
+      const studentRecord = studentResult?.data as {
+        student_status: string
+        programme: Related<{ department_id: string }>
+      } | null
+      const studentDepartmentId = related(studentRecord?.programme)?.department_id
+      const enrolledOfferingIds = new Set((enrollmentResult.data ?? [])
+        .filter((enrollment) => enrollment.enrollment_status === 'enrolled')
+        .map((enrollment) => enrollment.course_offering_id))
+      const studentEnrollmentIds = new Set((enrollmentResult.data ?? [])
+        .map((enrollment) => enrollment.course_offering_id))
       const visibleOfferings = role === 'lecturer'
         ? allOfferings.filter((offering) => offering.lecturer_id === userId)
         : role === 'student'
-          ? allOfferings.filter((offering) => enrollmentResult.data?.some((enrollment) => enrollment.course_offering_id === offering.id))
+          ? allOfferings.filter((offering) => enrolledOfferingIds.has(offering.id))
           : canManage
             ? allOfferings.filter((offering) =>
                 role !== 'department_head'
                 || !ownDepartmentId
                 || related(offering.course)?.department_id === ownDepartmentId)
             : []
+      const availableStudentOfferings = role === 'student'
+        && studentRecord?.student_status === 'active'
+        && studentDepartmentId
+        ? allOfferings.filter((offering) =>
+            offering.student_selection_open
+            && related(offering.course)?.is_active
+            && related(offering.course)?.department_id === studentDepartmentId
+            && !studentEnrollmentIds.has(offering.id))
+        : []
       const offeringCourseIds = new Set(visibleOfferings.map((offering) => related(offering.course)?.id).filter((id): id is string => Boolean(id)))
       const visibleDepartments = role === 'department_head' && ownDepartmentId
         ? (departmentResult.data ?? []).filter((department) => department.id === ownDepartmentId)
@@ -285,6 +319,7 @@ export function AcademicsPage({ role, userId }: Props) {
             || course.department_id === ownDepartmentId)
         : (courseResult.data ?? []).filter((course) => offeringCourseIds.has(course.id)))
       setOfferings(visibleOfferings)
+      setAvailableStudentOfferings(availableStudentOfferings)
       setProgrammes(programmeResult.data ?? [])
       setProgrammeYearOfferings((mappingResult.data ?? []) as ProgrammeYearOffering[])
       if (canManage) {
@@ -299,6 +334,43 @@ export function AcademicsPage({ role, userId }: Props) {
     }
   }, [canManage, role, userId])
   usePageData(load, [load])
+
+  async function selectCourseOffering(offering: Offering) {
+    if (!supabase || role !== 'student') return
+    setSelectingOfferingId(offering.id)
+    setError(''); setSuccess('')
+    try {
+      const { error: selectionError } = await supabase.rpc('select_college_course_offering', {
+        p_course_offering_id: offering.id,
+      })
+      if (selectionError) throw selectionError
+      setSuccess(`${related(offering.course)?.code ?? 'Course'} selected and enrolled. It will now appear in your timetable.`)
+      await load()
+    } catch (caught) {
+      setError(messageOf(caught))
+    } finally {
+      setSelectingOfferingId('')
+    }
+  }
+
+  async function loadLecturerRoster(offering: Offering) {
+    if (!supabase || role !== 'lecturer') return
+    setSelectedRosterOfferingId(offering.id)
+    setRosterLoading(true)
+    setError('')
+    try {
+      const { data, error: rosterError } = await supabase.rpc('get_college_lecturer_course_roster', {
+        p_course_offering_id: offering.id,
+      })
+      if (rosterError) throw rosterError
+      setLecturerRoster((data ?? []) as LecturerCourseRosterRow[])
+    } catch (caught) {
+      setLecturerRoster([])
+      setError(messageOf(caught))
+    } finally {
+      setRosterLoading(false)
+    }
+  }
 
   async function addCourse(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -383,7 +455,7 @@ export function AcademicsPage({ role, userId }: Props) {
       .eq('id', offering.id)
     setBusy(false)
     if (updateError) { setError(messageOf(updateError)); return }
-    setSuccess(`Student applications ${nextState ? 'opened' : 'closed'} for ${related(offering.course)?.code ?? 'this course offering'}.`)
+    setSuccess(`Student course selection ${nextState ? 'opened' : 'closed'} for ${related(offering.course)?.code ?? 'this course offering'}.`)
     await load()
   }
 
@@ -440,10 +512,35 @@ export function AcademicsPage({ role, userId }: Props) {
           <Panel title={`Subjects (${courses.length})`}>
             {courses.length ? <Table headers={['Code', 'Subject', 'Department', 'Credits', 'Status', ...(canManage ? ['Action'] : [])]}>{courses.map((course) => <Row key={course.id}><Cell>{course.code}</Cell><Cell>{course.name}</Cell><Cell>{departments.find((department) => department.id === course.department_id)?.code ?? '—'}</Cell><Cell>{course.credit_hours}</Cell><Cell>{course.is_active ? 'Active' : 'Inactive'}</Cell>{canManage && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void toggleCourse(course)} type="button">{course.is_active ? 'Deactivate' : 'Activate'}</button></Cell>}</Row>)}</Table> : <Empty>No subjects are recorded.</Empty>}
           </Panel>
-          <Panel title={`Course offerings (${offerings.length})`}>
-            {offerings.length ? <Table headers={['Subject', 'Academic year', 'Term', 'Section', 'Lecturer', ...(canManage ? ['Applications'] : [])]}>{offerings.map((offering) => <Row key={offering.id}><Cell>{related(offering.course)?.code ?? '—'} · {related(offering.course)?.name ?? ''}</Cell><Cell>{offering.academic_year}</Cell><Cell>{offering.term}</Cell><Cell>{offering.section}</Cell><Cell>{offering.lecturer_id ? staff.find((member) => member.id === offering.lecturer_id)?.staff_number ?? 'Assigned' : 'Unassigned'}</Cell>{canManage && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void toggleStudentSelection(offering)} type="button">{offering.student_selection_open ? 'Close selection' : 'Open selection'}</button></Cell>}</Row>)}</Table> : <Empty>No course offerings are recorded.</Empty>}
+          <Panel title={`${role === 'student' ? 'My enrolled offerings' : 'Course offerings'} (${offerings.length})`}>
+            {offerings.length ? <Table headers={['Subject', 'Academic year', 'Term', 'Section', 'Lecturer', ...(canManage ? ['Course selection'] : role === 'lecturer' ? ['Roster'] : [])]}>{offerings.map((offering) => <Row key={offering.id}><Cell>{related(offering.course)?.code ?? '—'} · {related(offering.course)?.name ?? ''}</Cell><Cell>{offering.academic_year}</Cell><Cell>{offering.term}</Cell><Cell>{offering.section}</Cell><Cell>{offering.lecturer_id ? staff.find((member) => member.id === offering.lecturer_id)?.staff_number ?? 'Assigned' : 'Unassigned'}</Cell>{canManage && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void toggleStudentSelection(offering)} type="button">{offering.student_selection_open ? 'Close selection' : 'Open selection'}</button></Cell>}{role === 'lecturer' && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={rosterLoading} onClick={() => void loadLecturerRoster(offering)} type="button">{selectedRosterOfferingId === offering.id && rosterLoading ? 'Loading…' : 'View students'}</button></Cell>}</Row>)}</Table> : <Empty>{role === 'student' ? 'You are not enrolled in any course offerings yet.' : 'No course offerings are recorded.'}</Empty>}
           </Panel>
         </div>
+      )}
+      {role === 'student' && (
+        <Panel title={`Open course offerings (${availableStudentOfferings.length})`}>
+          <p className="mb-4 text-xs text-slate-500">Select an offering published by the college in your programme department. Selection immediately enrolls you, and its timetable becomes visible in the Timetable page.</p>
+          {availableStudentOfferings.length ? (
+            <Table headers={['Subject', 'Academic year', 'Term', 'Section', 'Action']}>
+              {availableStudentOfferings.map((offering) => <Row key={offering.id}>
+                <Cell>{related(offering.course)?.code} · {related(offering.course)?.name}</Cell>
+                <Cell>{offering.academic_year}</Cell>
+                <Cell>{offering.term}</Cell>
+                <Cell>{offering.section}</Cell>
+                <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={Boolean(selectingOfferingId)} onClick={() => void selectCourseOffering(offering)} type="button">{selectingOfferingId === offering.id ? 'Enrolling…' : 'Select course'}</button></Cell>
+              </Row>)}
+            </Table>
+          ) : <Empty>No open course offerings are available for your department.</Empty>}
+        </Panel>
+      )}
+      {role === 'lecturer' && selectedRosterOfferingId && (
+        <Panel title={`Enrolled students · ${related(offerings.find((offering) => offering.id === selectedRosterOfferingId)?.course)?.code ?? 'Course'}`}>
+          {rosterLoading ? <Loading /> : lecturerRoster.length ? (
+            <Table headers={['Student name', 'Student number']}>
+              {lecturerRoster.map((student) => <Row key={student.student_number}><Cell>{student.full_name || '—'}</Cell><Cell>{student.student_number}</Cell></Row>)}
+            </Table>
+          ) : <Empty>No enrolled students are recorded for this course offering.</Empty>}
+        </Panel>
       )}
     </PageFrame>
   )
@@ -490,7 +587,12 @@ export function TimetablePage({ role, userId }: Props) {
         .in('course_offering_id', offeringIds)
         .order('day_of_week')
         .order('starts_at')
-      if (slotResult.error) throw slotResult.error
+      if (slotResult.error) {
+        if (slotResult.error.message.includes('slot_status')) {
+          throw new Error('The timetable database is missing slot_status. Apply migration 20261127100000_fix_timetable_slot_status_and_student_scope.sql in Supabase, then retry.')
+        }
+        throw slotResult.error
+      }
       setSlots((slotResult.data ?? []) as Slot[])
       if (offeringIds.length) {
         const lecturerIds = [...new Set(visibleOfferings.map((offering) => offering.lecturer_id).filter((id): id is string => Boolean(id)))]
