@@ -478,7 +478,7 @@ function App() {
           ) : page === 'Staff' ? (
             <StaffPage role={role!} />
           ) : page === 'Departments' ? (
-            <DepartmentsPage canManage={canManageDepartments} canDelete={canDeleteDepartments} />
+            <DepartmentsPage canManage={canManageDepartments} canDelete={canDeleteDepartments} role={role!} userId={user.id} />
           ) : page === 'Programmes' ? (
             <ProgrammesPage canManage={canManageDepartments} />
           ) : page === 'Registrations' ? (

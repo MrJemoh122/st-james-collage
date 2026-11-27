@@ -31,6 +31,14 @@ export const registrationAdminRoles: CollegeRole[] = [
 
 type Props = { user: User; onRefresh?: () => void }
 type Department = { id: string; code: string; name: string; is_active: boolean }
+type DepartmentSubject = {
+  id: string
+  department_id: string
+  code: string
+  name: string
+  credit_hours: number
+  is_active: boolean
+}
 type Programme = { id: string; code: string; name: string; duration_years: number | null; department_id?: string }
 type CourseOfferingChoice = {
   id: string
@@ -540,34 +548,57 @@ function Field({ label, required, children }: { label: string; required?: boolea
   )
 }
 
-export function DepartmentsPage({ canManage, canDelete }: { canManage: boolean; canDelete: boolean }) {
+export function DepartmentsPage({
+  canManage,
+  canDelete,
+  role,
+  userId,
+}: {
+  canManage: boolean
+  canDelete: boolean
+  role: CollegeRole
+  userId: string
+}) {
   const [departments, setDepartments] = useState<Department[]>([])
+  const [subjects, setSubjects] = useState<DepartmentSubject[]>([])
+  const [ownDepartmentId, setOwnDepartmentId] = useState('')
+  const [subjectDrafts, setSubjectDrafts] = useState<Record<string, { code: string; name: string; creditHours: string }>>({})
   const [code, setCode] = useState('')
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
   const [isError, setIsError] = useState(false)
+  const canManageSubjects = canManage || role === 'department_head'
 
   const loadDepartments = useCallback(async () => {
     if (!supabase) return false
     setLoading(true)
-    const { data, error } = await supabase
-      .from('college_departments')
-      .select('id,code,name,is_active')
-      .order('name')
+    const [departmentResult, subjectResult, staffResult] = await Promise.all([
+      supabase.from('college_departments').select('id,code,name,is_active').order('name'),
+      supabase.from('college_courses').select('id,department_id,code,name,credit_hours,is_active').order('code'),
+      role === 'department_head'
+        ? supabase.from('college_staff').select('department_id').eq('id', userId).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+    ])
+    const error = departmentResult.error ?? subjectResult.error ?? staffResult.error
     if (error) {
       setIsError(true)
       setMessage(error.message)
       setLoading(false)
       return false
-    } else {
-      setDepartments(data ?? [])
-      setMessage('')
     }
+    const departmentId = staffResult.data?.department_id ?? ''
+    const allDepartments = departmentResult.data ?? []
+    setOwnDepartmentId(departmentId)
+    setDepartments(role === 'department_head' && departmentId
+      ? allDepartments.filter((department) => department.id === departmentId)
+      : allDepartments)
+    setSubjects(subjectResult.data ?? [])
+    setMessage('')
     setLoading(false)
     return true
-  }, [])
+  }, [role, userId])
 
   useEffect(() => {
     void loadDepartments()
@@ -645,6 +676,80 @@ export function DepartmentsPage({ canManage, canDelete }: { canManage: boolean; 
     await loadDepartments()
   }
 
+  async function addSubject(event: FormEvent<HTMLFormElement>, department: Department) {
+    event.preventDefault()
+    if (!supabase || !canManageSubjects) return
+    if (role === 'department_head' && department.id !== ownDepartmentId) {
+      setIsError(true)
+      setMessage('You can only add subjects to your assigned department.')
+      return
+    }
+    const draft = subjectDrafts[department.id] ?? { code: '', name: '', creditHours: '1' }
+    const subjectCode = draft.code.trim().toUpperCase()
+    const subjectName = draft.name.trim()
+    const creditHours = Number(draft.creditHours)
+    if (!subjectCode || !subjectName || !Number.isInteger(creditHours) || creditHours < 1) {
+      setIsError(true)
+      setMessage('Enter a subject code, subject name, and valid credit hours.')
+      return
+    }
+
+    setBusy(true)
+    setMessage('')
+    const { error } = await supabase.from('college_courses').insert({
+      department_id: department.id,
+      code: subjectCode,
+      name: subjectName,
+      credit_hours: creditHours,
+    })
+    setBusy(false)
+    if (error) {
+      setIsError(true)
+      setMessage(error.code === '23505'
+        ? `Subject code "${subjectCode}" already exists. Choose a unique code.`
+        : error.message)
+      return
+    }
+    setSubjectDrafts((current) => ({ ...current, [department.id]: { code: '', name: '', creditHours: '1' } }))
+    setIsError(false)
+    setMessage(`Subject added to ${department.name}.`)
+    await loadDepartments()
+  }
+
+  async function deleteSubject(subject: DepartmentSubject) {
+    if (!supabase || !canManageSubjects) return
+    if (role === 'department_head' && subject.department_id !== ownDepartmentId) {
+      setIsError(true)
+      setMessage('You can only delete subjects in your assigned department.')
+      return
+    }
+    if (!window.confirm(`Delete subject "${subject.code} · ${subject.name}"? This cannot be undone.`)) return
+
+    setBusy(true)
+    setMessage('')
+    const { data, error } = await supabase
+      .from('college_courses')
+      .delete()
+      .eq('id', subject.id)
+      .select('id')
+    setBusy(false)
+    if (error) {
+      setIsError(true)
+      setMessage(error.code === '23503'
+        ? 'This subject is used by course offerings or academic records and cannot be deleted. Deactivate it instead.'
+        : error.message)
+      return
+    }
+    if (!data?.length) {
+      setIsError(true)
+      setMessage('The subject was not found or your account is not permitted to delete it.')
+      return
+    }
+    setIsError(false)
+    setMessage(`Subject ${subject.code} deleted.`)
+    await loadDepartments()
+  }
+
   async function deleteDepartment(department: Department) {
     if (!supabase || !canDelete) return
     const confirmed = window.confirm(
@@ -687,7 +792,7 @@ export function DepartmentsPage({ canManage, canDelete }: { canManage: boolean; 
       <div>
         <p className="text-xs font-medium text-slate-500">Academic structure</p>
         <h2 className="mt-1 text-2xl font-bold tracking-tight">Departments</h2>
-        <p className="mt-2 text-sm text-slate-500">Manage departments. Departments linked to programmes, courses, staff, or applications cannot be deleted.</p>
+        <p className="mt-2 text-sm text-slate-500">Manage departments and their subjects. Students can view active subjects for their department in Academics.</p>
       </div>
       {canManage && (
         <form className="mt-6 grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 sm:grid-cols-[1fr_2fr_auto] sm:items-end dark:border-slate-800 dark:bg-slate-900" onSubmit={addDepartment}>
@@ -703,33 +808,87 @@ export function DepartmentsPage({ canManage, canDelete }: { canManage: boolean; 
         </form>
       )}
       <div className="mt-5"><FormMessage error={isError} message={message} /></div>
-      <section className="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
-        {loading ? <LoadingCard label="Loading departments…" /> : departments.length ? (
-          <div className="divide-y divide-slate-100 dark:divide-slate-800">
-            {departments.map((department) => (
-              <div key={department.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:px-5">
-                <div className="flex-1">
-                  <p className="text-sm font-semibold">{department.name}</p>
-                  <p className="mt-1 text-xs text-slate-500">{department.code}</p>
+      {loading ? <LoadingCard label="Loading departments…" /> : departments.length ? (
+        <div className="mt-4 grid gap-4 xl:grid-cols-2">
+          {departments.map((department) => {
+            const departmentSubjects = subjects.filter((subject) => subject.department_id === department.id)
+            const draft = subjectDrafts[department.id] ?? { code: '', name: '', creditHours: '1' }
+            return (
+              <section key={department.id} className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                <header className="flex flex-wrap items-start gap-3">
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-sm font-bold">{department.code} · {department.name}</h3>
+                    <p className="mt-1 text-xs text-slate-500">{departmentSubjects.length} subject{departmentSubjects.length === 1 ? '' : 's'}</p>
+                  </div>
+                  <span className={`w-fit rounded-full px-2.5 py-1 text-[10px] font-semibold ${department.is_active ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-800'}`}>
+                    {department.is_active ? 'Active' : 'Inactive'}
+                  </span>
+                  {canManage && (
+                    <button className="secondary-button justify-center" disabled={busy} onClick={() => void toggleActive(department)} type="button">
+                      {department.is_active ? 'Deactivate' : 'Activate'}
+                    </button>
+                  )}
+                  {canDelete && (
+                    <button className="secondary-button justify-center text-rose-600" disabled={busy} onClick={() => void deleteDepartment(department)} type="button">
+                      <Trash2 size={14} /> Delete
+                    </button>
+                  )}
+                </header>
+
+                <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
+                  {departmentSubjects.length ? departmentSubjects.map((subject) => (
+                    <div key={subject.id} className="flex items-center gap-3 py-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-xs font-semibold">{subject.code} · {subject.name}</p>
+                        <p className="mt-1 text-[10px] text-slate-500">{subject.credit_hours} credit hours · {subject.is_active ? 'Active' : 'Inactive'}</p>
+                      </div>
+                      {canManageSubjects && (
+                        <button
+                          aria-label={`Delete ${subject.code} ${subject.name}`}
+                          className="secondary-button justify-center text-rose-600"
+                          disabled={busy}
+                          onClick={() => void deleteSubject(subject)}
+                          type="button"
+                        >
+                          <Trash2 size={14} /> Delete
+                        </button>
+                      )}
+                    </div>
+                  )) : <p className="py-4 text-xs text-slate-500">No subjects have been added to this department.</p>}
                 </div>
-                <span className={`w-fit rounded-full px-2.5 py-1 text-[10px] font-semibold ${department.is_active ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-800'}`}>
-                  {department.is_active ? 'Active' : 'Inactive'}
-                </span>
-                {canManage && (
-                  <button className="secondary-button justify-center" disabled={busy} onClick={() => void toggleActive(department)} type="button">
-                    {department.is_active ? 'Deactivate' : 'Activate'}
-                  </button>
+
+                {canManageSubjects && (
+                  <form className="mt-4 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-[1fr_2fr_100px_auto] sm:items-end dark:border-slate-800" onSubmit={(event) => void addSubject(event, department)}>
+                    <Field label="Subject code" required>
+                      <input className="form-input uppercase" maxLength={40} required value={draft.code} onChange={(event) => setSubjectDrafts((current) => ({
+                        ...current,
+                        [department.id]: { ...draft, code: event.target.value },
+                      }))} />
+                    </Field>
+                    <Field label="Subject name" required>
+                      <input className="form-input" maxLength={160} required value={draft.name} onChange={(event) => setSubjectDrafts((current) => ({
+                        ...current,
+                        [department.id]: { ...draft, name: event.target.value },
+                      }))} />
+                    </Field>
+                    <Field label="Credits" required>
+                      <input className="form-input" max="100" min="1" required type="number" value={draft.creditHours} onChange={(event) => setSubjectDrafts((current) => ({
+                        ...current,
+                        [department.id]: { ...draft, creditHours: event.target.value },
+                      }))} />
+                    </Field>
+                    <button className="primary-button h-10 justify-center" disabled={busy} type="submit">
+                      <Plus size={14} /> Add subject
+                    </button>
+                  </form>
                 )}
-                {canDelete && (
-                  <button className="secondary-button justify-center text-rose-600" disabled={busy} onClick={() => void deleteDepartment(department)} type="button">
-                    <Trash2 size={14} /> Delete
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        ) : <p className="p-8 text-center text-sm text-slate-500">No departments yet.</p>}
-      </section>
+              </section>
+            )
+          })}
+        </div>
+      ) : <p className="mt-4 rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500 dark:border-slate-700">
+        {role === 'department_head' && !ownDepartmentId ? 'No department is assigned to your account.' : 'No departments yet.'}
+      </p>}
     </div>
   )
 }
