@@ -10,43 +10,12 @@ ALTER TABLE public.college_course_study_years ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE public.college_course_study_years
   FROM PUBLIC, anon, authenticated;
-GRANT SELECT, INSERT, DELETE ON TABLE public.college_course_study_years
+GRANT SELECT ON TABLE public.college_course_study_years
   TO authenticated;
 
 CREATE POLICY college_course_study_years_read
   ON public.college_course_study_years FOR SELECT TO authenticated
   USING (true);
-
-CREATE POLICY college_course_study_years_manage
-  ON public.college_course_study_years FOR ALL TO authenticated
-  USING (
-    public.stj_has_role(
-      ARRAY['super_admin', 'college_admin', 'academic_registrar']::public.stj_college_role[]
-    )
-    OR (
-      public.stj_has_role(ARRAY['department_head']::public.stj_college_role[])
-      AND EXISTS (
-        SELECT 1
-        FROM public.college_courses AS course
-        WHERE course.id = college_course_study_years.course_id
-          AND course.department_id = public.stj_staff_department_id(auth.uid())
-      )
-    )
-  )
-  WITH CHECK (
-    public.stj_has_role(
-      ARRAY['super_admin', 'college_admin', 'academic_registrar']::public.stj_college_role[]
-    )
-    OR (
-      public.stj_has_role(ARRAY['department_head']::public.stj_college_role[])
-      AND EXISTS (
-        SELECT 1
-        FROM public.college_courses AS course
-        WHERE course.id = college_course_study_years.course_id
-          AND course.department_id = public.stj_staff_department_id(auth.uid())
-      )
-    )
-  );
 
 CREATE OR REPLACE FUNCTION public.set_college_course_study_years(
   p_course_id uuid,
