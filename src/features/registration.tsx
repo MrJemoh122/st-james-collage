@@ -447,7 +447,7 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
         uploadedDocuments.push({ path, name: document.file.name, type: document.type })
       }
 
-      const { error } = await supabase.schema('public').rpc('submit_college_student_application_with_qualification_preferences', {
+      const { error } = await supabase.schema('public').rpc('submit_college_student_application_with_qualification_prefs', {
         p_department_id: form.departmentId,
         p_full_name: form.fullName,
         p_phone: form.phone,
