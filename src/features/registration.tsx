@@ -98,6 +98,13 @@ function messageOf(error: unknown) {
   return 'Student application could not be submitted.'
 }
 
+function applicationSubmissionError(error: unknown) {
+  if (error && typeof error === 'object' && 'code' in error && error.code === 'PGRST202') {
+    return 'The student application function is missing from the Supabase API schema. Apply migration 20261128030000_qualification_course_offerings.sql, then reload the PostgREST schema cache.'
+  }
+  return messageOf(error)
+}
+
 function isAllowedPhoto(file: File) {
   return file.size > 0 && file.size <= maxFileSize && imageTypes.includes(file.type)
 }
@@ -460,7 +467,7 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
           cleanupMessage = ` Uploaded files need cleanup: ${messageOf(cleanupError)}`
         }
       }
-      showError(`${messageOf(error)}${cleanupMessage}`)
+      showError(`${applicationSubmissionError(error)}${cleanupMessage}`)
     } finally {
       setBusy(false)
     }
