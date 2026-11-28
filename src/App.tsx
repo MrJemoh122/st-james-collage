@@ -866,6 +866,7 @@ function StudentOverview({
     photoUrl: string | null
     profile: { full_name: string; email: string | null } | Array<{ full_name: string; email: string | null }> | null
     department: { code: string; name: string } | Array<{ code: string; name: string }> | null
+    qualification: { name: string } | Array<{ name: string }> | null
   } | null>(null)
 
   useEffect(() => {
@@ -882,7 +883,7 @@ function StudentOverview({
         const [studentResult, enrollmentResult] = await Promise.all([
           supabase
             .from('college_students')
-            .select('student_number,student_status,study_year,photo_path,profile:college_profiles(full_name,email),department:college_departments(code,name)')
+            .select('student_number,student_status,study_year,photo_path,profile:college_profiles(full_name,email),department:college_departments(code,name),qualification:college_qualification_offerings!college_students_qualification_offering_id_fkey(name)')
             .eq('id', userId)
             .maybeSingle(),
           supabase
@@ -987,6 +988,9 @@ function StudentOverview({
   const studentDepartment = studentProfile
     ? Array.isArray(studentProfile.department) ? studentProfile.department[0] : studentProfile.department
     : null
+  const studentQualification = studentProfile
+    ? Array.isArray(studentProfile.qualification) ? studentProfile.qualification[0] : studentProfile.qualification
+    : null
   const studentIdentity = studentProfile
     ? Array.isArray(studentProfile.profile) ? studentProfile.profile[0] : studentProfile.profile
     : null
@@ -1008,9 +1012,9 @@ function StudentOverview({
             <p className="text-lg font-bold">{studentIdentity?.full_name ?? 'Student profile'}</p>
             <p className="mt-1 text-xs font-semibold text-indigo-700 dark:text-indigo-300">{studentProfile.student_number} · {studentProfile.student_status.replaceAll('_', ' ')}</p>
             <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">
-              {studentDepartment ? `${studentDepartment.code} · ${studentDepartment.name}` : 'Department not set'} · {studentProfile.study_year ? `Year ${studentProfile.study_year}` : 'Study year not set'}
+              {studentDepartment ? `${studentDepartment.code} · ${studentDepartment.name}` : 'Department not set'} · {studentProfile.study_year ? `Year ${studentProfile.study_year}` : 'Study year not set'} · {studentQualification?.name ?? 'Course offering not assigned'}
             </p>
-            {subjects.length === 0 && <p className="mt-3 text-xs text-slate-600 dark:text-slate-400">No course offerings are linked yet. Select an open course offering from Academics or contact the registrar.</p>}
+            {subjects.length === 0 && <p className="mt-3 text-xs text-slate-600 dark:text-slate-400">No subjects are linked to your course offering yet. Contact the registrar or academic office.</p>}
           </section>
           <section aria-label="Student profile photo" className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900 sm:w-56 sm:flex-col sm:justify-center sm:p-4">
             {studentProfile.photoUrl

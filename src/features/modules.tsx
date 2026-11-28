@@ -9,6 +9,19 @@ type Props = { role: CollegeRole; userId: string }
 type Related<T> = T | T[] | null
 type Department = { id: string; code: string; name: string }
 type Course = { id: string; code: string; name: string; department_id: string; credit_hours: number; is_active: boolean; study_years: number[] }
+type QualificationOffering = {
+  id: string
+  department_id: string
+  name: string
+  is_active: boolean
+  application_open: boolean
+}
+type QualificationSubject = {
+  qualification_offering_id: string
+  course_id: string
+  study_year: number
+  term: number
+}
 type Staff = { id: string; staff_number: string }
 type Offering = {
   id: string
@@ -212,19 +225,24 @@ export function AcademicsPage({ role, userId }: Props) {
   const [departments, setDepartments] = useState<Department[]>([])
   const [studentDepartment, setStudentDepartment] = useState<Department | null>(null)
   const [studentStudyYear, setStudentStudyYear] = useState<number | null>(null)
+  const [studentQualification, setStudentQualification] = useState<QualificationOffering | null>(null)
   const [courses, setCourses] = useState<Course[]>([])
   const [offerings, setOfferings] = useState<Offering[]>([])
-  const [availableStudentOfferings, setAvailableStudentOfferings] = useState<Offering[]>([])
+  const [qualificationOfferings, setQualificationOfferings] = useState<QualificationOffering[]>([])
+  const [qualificationSubjects, setQualificationSubjects] = useState<QualificationSubject[]>([])
+  const [selectedQualificationOfferingId, setSelectedQualificationOfferingId] = useState('')
+  const [qualificationStudyYear, setQualificationStudyYear] = useState('1')
+  const [qualificationTerm, setQualificationTerm] = useState('1')
   const [staff, setStaff] = useState<Staff[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
-  const [selectingOfferingId, setSelectingOfferingId] = useState('')
   const [selectedRosterOfferingId, setSelectedRosterOfferingId] = useState('')
   const [lecturerRoster, setLecturerRoster] = useState<LecturerCourseRosterRow[]>([])
   const [rosterLoading, setRosterLoading] = useState(false)
   const [courseForm, setCourseForm] = useState({ department_id: '', code: '', name: '', credit_hours: '1', study_years: '1' })
+  const [qualificationForm, setQualificationForm] = useState({ department_id: '', name: '' })
   const [offeringForm, setOfferingForm] = useState({ course_id: '', lecturer_id: '', academic_year: '', term: '1', section: 'A' })
 
   const load = useCallback(async () => {
@@ -240,13 +258,13 @@ export function AcademicsPage({ role, userId }: Props) {
 
       const studentResult = role === 'student'
         ? await supabase.from('college_students')
-          .select('student_status,department_id,study_year,department:college_departments(id,code,name)')
+          .select('student_status,department_id,study_year,qualification_offering_id,department:college_departments(id,code,name),qualification:college_qualification_offerings!college_students_qualification_offering_id_fkey(id,department_id,name,is_active,application_open)')
           .eq('id', userId)
           .maybeSingle()
         : null
       if (studentResult?.error) throw studentResult.error
 
-      const [departmentResult, courseResult, offeringResult, enrollmentResult, courseYearResult] = await Promise.all([
+      const [departmentResult, courseResult, offeringResult, enrollmentResult, courseYearResult, qualificationResult, qualificationSubjectResult] = await Promise.all([
         supabase.from('college_departments').select('id,code,name').eq('is_active', true).order('name'),
         supabase.from('college_courses').select('id,code,name,department_id,credit_hours,is_active').order('code'),
         supabase.from('college_course_offerings').select('id,academic_year,term,section,lecturer_id,student_selection_open,course:college_courses(id,code,name,department_id,is_active)').order('academic_year', { ascending: false }),
@@ -254,20 +272,27 @@ export function AcademicsPage({ role, userId }: Props) {
           ? supabase.from('college_enrollments').select('course_offering_id,enrollment_status').eq('student_id', userId)
           : Promise.resolve({ data: [], error: null }),
         supabase.from('college_course_study_years').select('course_id,study_year').order('study_year'),
+        supabase.from('college_qualification_offerings').select('id,department_id,name,is_active,application_open').order('name'),
+        supabase.from('college_qualification_subjects').select('qualification_offering_id,course_id,study_year,term').order('study_year').order('term'),
       ])
       if (departmentResult.error) throw departmentResult.error
       if (courseResult.error) throw courseResult.error
       if (offeringResult.error) throw offeringResult.error
       if (enrollmentResult.error) throw enrollmentResult.error
       if (courseYearResult.error) throw courseYearResult.error
+      if (qualificationResult.error) throw qualificationResult.error
+      if (qualificationSubjectResult.error) throw qualificationSubjectResult.error
       const allOfferings = (offeringResult.data ?? []) as Offering[]
       const studentRecord = studentResult?.data as {
         student_status: string
         department_id: string
         study_year: number | null
+        qualification_offering_id: string | null
         department: Related<Department>
+        qualification: Related<QualificationOffering>
       } | null
       const studentDepartment = related(studentRecord?.department) ?? null
+      const studentQualification = related(studentRecord?.qualification) ?? null
       const studentDepartmentId = studentRecord?.department_id
       const studentStudyYear = studentRecord?.study_year == null
         ? null
@@ -282,11 +307,19 @@ export function AcademicsPage({ role, userId }: Props) {
         ...course,
         study_years: studyYearsByCourse.get(course.id) ?? [],
       }))
+      const allQualificationOfferings = (qualificationResult.data ?? []) as QualificationOffering[]
+      const allQualificationSubjects = (qualificationSubjectResult.data ?? []).map((subject) => ({
+        ...subject,
+        study_year: Number(subject.study_year),
+        term: Number(subject.term),
+      })) as QualificationSubject[]
       const enrolledOfferingIds = new Set((enrollmentResult.data ?? [])
         .filter((enrollment) => enrollment.enrollment_status === 'enrolled')
         .map((enrollment) => enrollment.course_offering_id))
-      const studentEnrollmentIds = new Set((enrollmentResult.data ?? [])
-        .map((enrollment) => enrollment.course_offering_id))
+      const enrolledCourseIds = new Set(allOfferings
+        .filter((offering) => enrolledOfferingIds.has(offering.id))
+        .map((offering) => related(offering.course)?.id)
+        .filter((id): id is string => Boolean(id)))
       const visibleOfferings = role === 'lecturer'
         ? allOfferings.filter((offering) => offering.lecturer_id === userId)
         : role === 'student'
@@ -297,24 +330,25 @@ export function AcademicsPage({ role, userId }: Props) {
                 || !ownDepartmentId
                 || related(offering.course)?.department_id === ownDepartmentId)
             : []
-      const availableStudentOfferings = role === 'student'
-        && studentRecord?.student_status === 'active'
-        && studentDepartmentId
-        && studentStudyYear
-        ? allOfferings.filter((offering) =>
-            offering.student_selection_open
-            && related(offering.course)?.is_active
-            && related(offering.course)?.department_id === studentDepartmentId
-            && studyYearsByCourse.get(related(offering.course)?.id ?? '')?.includes(studentStudyYear)
-            && !studentEnrollmentIds.has(offering.id))
+      const visibleQualificationOfferings = canManage
+        ? allQualificationOfferings.filter((offering) =>
+            role !== 'department_head'
+            || !ownDepartmentId
+            || offering.department_id === ownDepartmentId)
         : []
       const offeringCourseIds = new Set(visibleOfferings.map((offering) => related(offering.course)?.id).filter((id): id is string => Boolean(id)))
+      const qualificationCourseIds = new Set(allQualificationSubjects
+        .filter((subject) =>
+          subject.qualification_offering_id === studentRecord?.qualification_offering_id
+          && subject.study_year === studentStudyYear)
+        .map((subject) => subject.course_id))
       const visibleDepartments = role === 'department_head' && ownDepartmentId
         ? (departmentResult.data ?? []).filter((department) => department.id === ownDepartmentId)
         : (departmentResult.data ?? [])
       setDepartments(visibleDepartments)
       setStudentDepartment(role === 'student' ? studentDepartment : null)
       setStudentStudyYear(role === 'student' ? studentStudyYear : null)
+      setStudentQualification(role === 'student' ? studentQualification : null)
       setCourses(canManage
         ? allCourses.filter((course) =>
             role !== 'department_head'
@@ -324,10 +358,20 @@ export function AcademicsPage({ role, userId }: Props) {
           ? allCourses.filter((course) =>
               course.is_active
               && course.department_id === studentDepartmentId
-              && course.study_years.includes(studentStudyYear))
+              && (
+                enrolledCourseIds.has(course.id)
+                || (studentRecord?.qualification_offering_id
+                  ? qualificationCourseIds.has(course.id)
+                  : course.study_years.includes(studentStudyYear))
+              ))
           : allCourses.filter((course) => offeringCourseIds.has(course.id)))
       setOfferings(visibleOfferings)
-      setAvailableStudentOfferings(availableStudentOfferings)
+      setQualificationOfferings(visibleQualificationOfferings)
+      setQualificationSubjects(allQualificationSubjects)
+      setSelectedQualificationOfferingId((current) =>
+        visibleQualificationOfferings.some((offering) => offering.id === current)
+          ? current
+          : visibleQualificationOfferings[0]?.id ?? '')
       if (canManage) {
         const staffResult = await supabase.from('college_staff').select('id,staff_number').eq('employment_status', 'active').order('staff_number')
         if (staffResult.error) throw staffResult.error
@@ -340,24 +384,6 @@ export function AcademicsPage({ role, userId }: Props) {
     }
   }, [canManage, role, userId])
   usePageData(load, [load])
-
-  async function selectCourseOffering(offering: Offering) {
-    if (!supabase || role !== 'student') return
-    setSelectingOfferingId(offering.id)
-    setError(''); setSuccess('')
-    try {
-      const { error: selectionError } = await supabase.rpc('select_college_course_offering', {
-        p_course_offering_id: offering.id,
-      })
-      if (selectionError) throw selectionError
-      setSuccess(`${related(offering.course)?.code ?? 'Course'} selected and enrolled. It will now appear in your timetable.`)
-      await load()
-    } catch (caught) {
-      setError(messageOf(caught))
-    } finally {
-      setSelectingOfferingId('')
-    }
-  }
 
   async function loadLecturerRoster(offering: Offering) {
     if (!supabase || role !== 'lecturer') return
@@ -409,6 +435,76 @@ export function AcademicsPage({ role, userId }: Props) {
     await load()
   }
 
+  async function addQualificationOffering(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!supabase || !canManage) return
+    const name = qualificationForm.name.trim()
+    if (!qualificationForm.department_id || name.length < 3) {
+      setError('Choose a department and enter a course-offering name of at least three characters.')
+      return
+    }
+
+    setBusy(true); setError(''); setSuccess('')
+    const { data, error: insertError } = await supabase.from('college_qualification_offerings')
+      .insert({ department_id: qualificationForm.department_id, name })
+      .select('id')
+      .single()
+    setBusy(false)
+    if (insertError) { setError(messageOf(insertError)); return }
+    setQualificationForm({ department_id: '', name: '' })
+    setSelectedQualificationOfferingId(data.id)
+    setSuccess('Course offering created. Assign its subjects by year and term before opening applications.')
+    await load()
+  }
+
+  async function updateQualificationOffering(
+    qualification: QualificationOffering,
+    change: 'is_active' | 'application_open',
+  ) {
+    if (!supabase || !canManage) return
+    const nextValue = !qualification[change]
+    if (change === 'application_open' && nextValue
+      && !qualificationSubjects.some((subject) => subject.qualification_offering_id === qualification.id)) {
+      setError('Assign at least one subject before opening applications for this course offering.')
+      return
+    }
+
+    setBusy(true); setError(''); setSuccess('')
+    const { error: updateError } = await supabase.from('college_qualification_offerings')
+      .update({ [change]: nextValue })
+      .eq('id', qualification.id)
+    setBusy(false)
+    if (updateError) { setError(messageOf(updateError)); return }
+    setSuccess(change === 'is_active'
+      ? `Course offering ${nextValue ? 'activated' : 'deactivated'}.`
+      : `Applications ${nextValue ? 'opened' : 'closed'} for ${qualification.name}.`)
+    await load()
+  }
+
+  async function assignQualificationSubject(courseId: string, isAssigned: boolean) {
+    if (!supabase || !canManage || !selectedQualificationOfferingId) return
+    const studyYear = Number(qualificationStudyYear)
+    const term = Number(qualificationTerm)
+    if (!Number.isInteger(studyYear) || studyYear < 1 || studyYear > 20
+      || !Number.isInteger(term) || term < 1) {
+      setError('Choose a valid study year and term.')
+      return
+    }
+
+    setBusy(true); setError(''); setSuccess('')
+    const { error: assignmentError } = await supabase.rpc('set_college_qualification_subject', {
+      p_qualification_offering_id: selectedQualificationOfferingId,
+      p_course_id: courseId,
+      p_study_year: studyYear,
+      p_term: term,
+      p_is_assigned: isAssigned,
+    })
+    setBusy(false)
+    if (assignmentError) { setError(messageOf(assignmentError)); return }
+    setSuccess(`Subject ${isAssigned ? 'assigned to' : 'removed from'} the course offering for Year ${studyYear}, Term ${term}.`)
+    await load()
+  }
+
   async function addOffering(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!supabase || !canManage) return
@@ -423,7 +519,7 @@ export function AcademicsPage({ role, userId }: Props) {
     setBusy(false)
     if (insertError) { setError(insertError.message); return }
     setOfferingForm({ course_id: '', lecturer_id: '', academic_year: '', term: '1', section: 'A' })
-    setSuccess('Course offering created.')
+    setSuccess('Subject class created.')
     await load()
   }
 
@@ -437,7 +533,7 @@ export function AcademicsPage({ role, userId }: Props) {
     await load()
   }
 
-  async function toggleStudentSelection(offering: Offering) {
+  async function toggleOfferingEnrollment(offering: Offering) {
     if (!supabase || !canManage) return
     setBusy(true); setError(''); setSuccess('')
     const nextState = !offering.student_selection_open
@@ -446,12 +542,16 @@ export function AcademicsPage({ role, userId }: Props) {
       .eq('id', offering.id)
     setBusy(false)
     if (updateError) { setError(messageOf(updateError)); return }
-    setSuccess(`Student course selection ${nextState ? 'opened' : 'closed'} for ${related(offering.course)?.code ?? 'this course offering'}.`)
+    setSuccess(`Student enrollment ${nextState ? 'opened' : 'closed'} for ${related(offering.course)?.code ?? 'this subject class'}.`)
     await load()
   }
 
+  const selectedQualificationOffering = qualificationOfferings.find(
+    (qualification) => qualification.id === selectedQualificationOfferingId,
+  )
+
   return (
-    <PageFrame title="Academics" description="Manage subjects, course offerings and academic delivery." actions={<button className="secondary-button" onClick={() => void load()} type="button"><RefreshCw size={14} /> Refresh</button>}>
+    <PageFrame title="Academics" description="Manage subjects, qualification course offerings, subject classes and academic delivery." actions={<button className="secondary-button" onClick={() => void load()} type="button"><RefreshCw size={14} /> Refresh</button>}>
       <Notice error={error} success={success} />
       {canManage && (
         <div className="grid gap-5 xl:grid-cols-2">
@@ -465,22 +565,76 @@ export function AcademicsPage({ role, userId }: Props) {
               <button className="primary-button sm:col-span-2" disabled={busy || !departments.length} type="submit"><Plus size={14} /> Create subject</button>
             </form>
           </Panel>
-          <Panel title="Create course offering">
+          <Panel title="Create subject class">
             <form className="grid gap-3 sm:grid-cols-2" onSubmit={addOffering}>
               <Field label="Subject"><SelectInput onChange={(event) => setOfferingForm({ ...offeringForm, course_id: event.target.value })} required value={offeringForm.course_id}><option value="">Select subject</option>{courses.filter((course) => course.is_active).map((course) => <option key={course.id} value={course.id}>{course.code} · {course.name}</option>)}</SelectInput></Field>
               <Field label="Lecturer"><SelectInput onChange={(event) => setOfferingForm({ ...offeringForm, lecturer_id: event.target.value })} value={offeringForm.lecturer_id}><option value="">Unassigned</option>{staff.map((member) => <option key={member.id} value={member.id}>{member.staff_number}</option>)}</SelectInput></Field>
               <Field label="Academic year"><TextInput maxLength={20} onChange={(event) => setOfferingForm({ ...offeringForm, academic_year: event.target.value })} placeholder="2026/2027" required value={offeringForm.academic_year} /></Field>
               <Field label="Semester / term"><TextInput min="1" onChange={(event) => setOfferingForm({ ...offeringForm, term: event.target.value })} required type="number" value={offeringForm.term} /></Field>
               <Field label="Section / class"><TextInput maxLength={40} onChange={(event) => setOfferingForm({ ...offeringForm, section: event.target.value })} required value={offeringForm.section} /></Field>
-              <button className="primary-button self-end" disabled={busy || !courses.length} type="submit"><Plus size={14} /> Create offering</button>
+              <button className="primary-button self-end" disabled={busy || !courses.length} type="submit"><Plus size={14} /> Create subject class</button>
             </form>
           </Panel>
         </div>
       )}
+      {canManage && (
+        <Panel title={`Qualification course offerings (${qualificationOfferings.length})`}>
+          <p className="mb-4 text-xs leading-5 text-slate-500">A course offering is a qualification such as Certificate in IT or Diploma in HR. Assign its subjects by year and term, then open applications when it is ready.</p>
+          <form className="grid gap-3 border-b border-slate-100 pb-5 sm:grid-cols-[1fr_2fr_auto] sm:items-end dark:border-slate-800" onSubmit={addQualificationOffering}>
+            <Field label="Department"><SelectInput onChange={(event) => setQualificationForm({ ...qualificationForm, department_id: event.target.value })} required value={qualificationForm.department_id}><option value="">Select department</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.code} · {department.name}</option>)}</SelectInput></Field>
+            <Field label="Course offering name"><TextInput maxLength={160} onChange={(event) => setQualificationForm({ ...qualificationForm, name: event.target.value })} placeholder="Certificate in IT" required value={qualificationForm.name} /></Field>
+            <button className="primary-button h-10 justify-center" disabled={busy || !departments.length} type="submit"><Plus size={14} /> Add offering</button>
+          </form>
+          {qualificationOfferings.length ? (
+            <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
+              <div className="space-y-2">
+                {qualificationOfferings.map((qualification) => (
+                  <div className={`rounded-xl border p-3 ${qualification.id === selectedQualificationOfferingId ? 'border-indigo-300 bg-indigo-50/60 dark:border-indigo-800 dark:bg-indigo-950/30' : 'border-slate-200 dark:border-slate-700'}`} key={qualification.id}>
+                    <button className="block w-full text-left" onClick={() => setSelectedQualificationOfferingId(qualification.id)} type="button">
+                      <span className="block text-xs font-semibold">{qualification.name}</span>
+                      <span className="mt-1 block text-[10px] text-slate-500">{departments.find((item) => item.id === qualification.department_id)?.code ?? 'Department'} · {qualification.is_active ? 'Active' : 'Inactive'} · {qualification.application_open ? 'Applications open' : 'Applications closed'}</span>
+                    </button>
+                    <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
+                      <button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void updateQualificationOffering(qualification, 'is_active')} type="button">{qualification.is_active ? 'Deactivate' : 'Activate'}</button>
+                      <button className="text-indigo-700 dark:text-indigo-300" disabled={busy || (!qualification.application_open && !qualificationSubjects.some((subject) => subject.qualification_offering_id === qualification.id))} onClick={() => void updateQualificationOffering(qualification, 'application_open')} type="button">{qualification.application_open ? 'Close applications' : 'Open applications'}</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {selectedQualificationOffering ? (
+                <div>
+                  <h4 className="text-xs font-bold">{selectedQualificationOffering.name} · Subject assignments</h4>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <Field label="Study year"><TextInput max="20" min="1" onChange={(event) => setQualificationStudyYear(event.target.value)} required type="number" value={qualificationStudyYear} /></Field>
+                    <Field label="Term"><TextInput min="1" onChange={(event) => setQualificationTerm(event.target.value)} required type="number" value={qualificationTerm} /></Field>
+                  </div>
+                  <div className="mt-3 max-h-80 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-700">
+                    {courses.filter((course) => course.is_active && course.department_id === selectedQualificationOffering.department_id).length ? (
+                      <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {courses.filter((course) => course.is_active && course.department_id === selectedQualificationOffering.department_id).map((course) => {
+                          const assigned = qualificationSubjects.some((subject) =>
+                            subject.qualification_offering_id === selectedQualificationOffering.id
+                            && subject.course_id === course.id
+                            && subject.study_year === Number(qualificationStudyYear)
+                            && subject.term === Number(qualificationTerm))
+                          return <li className="flex items-center gap-3 px-3 py-2.5 text-xs" key={course.id}>
+                            <input aria-label={`${assigned ? 'Remove' : 'Assign'} ${course.code} for Year ${qualificationStudyYear}, Term ${qualificationTerm}`} checked={assigned} disabled={busy} onChange={(event) => void assignQualificationSubject(course.id, event.target.checked)} type="checkbox" />
+                            <span className="min-w-0"><span className="font-semibold">{course.code} · {course.name}</span><span className="ml-2 text-slate-500">{course.credit_hours} credits</span></span>
+                          </li>
+                        })}
+                      </ul>
+                    ) : <p className="p-4 text-xs text-slate-500">Add active subjects to this department before assigning them.</p>}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : <Empty>No qualification course offerings have been created.</Empty>}
+        </Panel>
+      )}
       {role === 'student' && (
-        <Panel title="My department">
+        <Panel title="My department and course offering">
           {studentDepartment
-            ? <p className="text-sm font-semibold">{studentDepartment.code} · {studentDepartment.name}</p>
+            ? <div><p className="text-sm font-semibold">{studentDepartment.code} · {studentDepartment.name}</p><p className="mt-2 text-xs text-slate-500">{studentQualification?.name ?? 'No course offering assigned yet'} · {studentStudyYear ? `Year ${studentStudyYear}` : 'Study year not set'}</p></div>
             : <Empty>No department is assigned to your account yet. Contact the registrar.</Empty>}
         </Panel>
       )}
@@ -500,29 +654,13 @@ export function AcademicsPage({ role, userId }: Props) {
                 </Row>)}
               </Table>
             ) : <Empty>{role === 'student'
-              ? 'No active subjects are assigned to your department and study year yet. Contact the registrar or department head.'
+              ? 'No active subjects are mapped to your course offering and study year yet. Contact the registrar or department head.'
               : 'No subjects are recorded.'}</Empty>}
           </Panel>
-          <Panel title={`${role === 'student' ? 'My enrolled offerings' : 'Course offerings'} (${offerings.length})`}>
-            {offerings.length ? <Table headers={['Subject', 'Academic year', 'Term', 'Section', 'Lecturer', ...(canManage ? ['Course selection'] : role === 'lecturer' ? ['Roster'] : [])]}>{offerings.map((offering) => <Row key={offering.id}><Cell>{related(offering.course)?.code ?? '—'} · {related(offering.course)?.name ?? ''}</Cell><Cell>{offering.academic_year}</Cell><Cell>{offering.term}</Cell><Cell>{offering.section}</Cell><Cell>{offering.lecturer_id ? staff.find((member) => member.id === offering.lecturer_id)?.staff_number ?? 'Assigned' : 'Unassigned'}</Cell>{canManage && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void toggleStudentSelection(offering)} type="button">{offering.student_selection_open ? 'Close selection' : 'Open selection'}</button></Cell>}{role === 'lecturer' && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={rosterLoading} onClick={() => void loadLecturerRoster(offering)} type="button">{selectedRosterOfferingId === offering.id && rosterLoading ? 'Loading…' : 'View students'}</button></Cell>}</Row>)}</Table> : <Empty>{role === 'student' ? 'You are not enrolled in any course offerings yet.' : 'No course offerings are recorded.'}</Empty>}
+          <Panel title={`${role === 'student' ? 'My enrolled subject classes' : 'Subject classes'} (${offerings.length})`}>
+            {offerings.length ? <Table headers={['Subject', 'Academic year', 'Term', 'Section', 'Lecturer', ...(canManage ? ['Student enrollment'] : role === 'lecturer' ? ['Roster'] : [])]}>{offerings.map((offering) => <Row key={offering.id}><Cell>{related(offering.course)?.code ?? '—'} · {related(offering.course)?.name ?? ''}</Cell><Cell>{offering.academic_year}</Cell><Cell>{offering.term}</Cell><Cell>{offering.section}</Cell><Cell>{offering.lecturer_id ? staff.find((member) => member.id === offering.lecturer_id)?.staff_number ?? 'Assigned' : 'Unassigned'}</Cell>{canManage && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={busy} onClick={() => void toggleOfferingEnrollment(offering)} type="button">{offering.student_selection_open ? 'Close enrollment' : 'Open enrollment'}</button></Cell>}{role === 'lecturer' && <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={rosterLoading} onClick={() => void loadLecturerRoster(offering)} type="button">{selectedRosterOfferingId === offering.id && rosterLoading ? 'Loading…' : 'View students'}</button></Cell>}</Row>)}</Table> : <Empty>{role === 'student' ? 'You are not enrolled in any subject classes yet.' : 'No subject classes are recorded.'}</Empty>}
           </Panel>
         </div>
-      )}
-      {role === 'student' && (
-        <Panel title={`Open course offerings (${availableStudentOfferings.length})`}>
-          <p className="mb-4 text-xs text-slate-500">Select an offering published by the college in your department. Selection immediately enrolls you, and its timetable becomes visible in the Timetable page.</p>
-          {availableStudentOfferings.length ? (
-            <Table headers={['Subject', 'Academic year', 'Term', 'Section', 'Action']}>
-              {availableStudentOfferings.map((offering) => <Row key={offering.id}>
-                <Cell>{related(offering.course)?.code} · {related(offering.course)?.name}</Cell>
-                <Cell>{offering.academic_year}</Cell>
-                <Cell>{offering.term}</Cell>
-                <Cell>{offering.section}</Cell>
-                <Cell><button className="text-indigo-700 dark:text-indigo-300" disabled={Boolean(selectingOfferingId)} onClick={() => void selectCourseOffering(offering)} type="button">{selectingOfferingId === offering.id ? 'Enrolling…' : 'Select course'}</button></Cell>
-              </Row>)}
-            </Table>
-          ) : <Empty>No open course offerings are available for your department.</Empty>}
-        </Panel>
       )}
       {role === 'lecturer' && selectedRosterOfferingId && (
         <Panel title={`Enrolled students · ${related(offerings.find((offering) => offering.id === selectedRosterOfferingId)?.course)?.code ?? 'Course'}`}>
@@ -653,7 +791,7 @@ export function TimetablePage({ role, userId }: Props) {
     const department = generationDepartments.find((item) => item.id === generationForm.department_id)
     if (!department || !generationForm.academic_year || !generationForm.term) return
     if (!window.confirm(
-      `Generate the ${department.name} timetable for ${generationForm.academic_year}, Term ${generationForm.term}, and enroll active students whose study year matches each subject? Existing timetable slots and enrollment records will be preserved.`,
+      `Generate the ${department.name} timetable for ${generationForm.academic_year}, Term ${generationForm.term}, and enroll active students whose course offering, department, year, and term match each open subject class? Existing timetable slots and enrollment records will be preserved.`,
     )) return
 
     setBusy(true); setError(''); setSuccess('')
@@ -753,7 +891,7 @@ export function TimetablePage({ role, userId }: Props) {
       </form></Panel>}
       {canManage && <Panel title="Generate timetable and enroll department students">
         <p className="mb-4 text-sm text-slate-600 dark:text-slate-300">
-          Creates slots for active offerings that do not already have a scheduled slot. Classes use weekdays from 08:00 to 17:00, with a 1- or 2-hour duration based on subject credit hours, and the 33 lecture rooms, seminar rooms, and lecture theaters. Active students are enrolled when their department and study year match the subject. Existing slots and enrollment records are preserved.
+          Creates slots for active subject classes that do not already have a scheduled slot in the selected academic year and term. Classes use weekdays from 08:00 to 17:00, with a 1- or 2-hour duration based on subject credit hours, and the 33 lecture rooms, seminar rooms, and lecture theaters. Active students are enrolled when their department, course offering, study year, and term match the subject and the class is open for enrollment. Rerun generation after approving or assigning students so they are enrolled in the selected term; existing slots and enrollments are preserved.
         </p>
         <div className="mb-4 grid gap-3 sm:grid-cols-3">
           <Field label="Department"><SelectInput onChange={(event) => setGenerationForm({ department_id: event.target.value, academic_year: '', term: '' })} required value={generationForm.department_id}>
