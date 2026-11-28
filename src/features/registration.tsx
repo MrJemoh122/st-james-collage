@@ -100,7 +100,7 @@ function messageOf(error: unknown) {
 
 function applicationSubmissionError(error: unknown) {
   if (error && typeof error === 'object' && 'code' in error && error.code === 'PGRST202') {
-    return "Supabase could not resolve the student-application RPC in its API schema. In the SQL Editor for this project, run NOTIFY pgrst, 'reload schema', then refresh the portal. If it persists, verify the function's argument names match the application RPC call."
+    return `Supabase's Data API could not resolve the student-application RPC for this signed-in request. The portal verified your session before submission, so rerunning the migration or restarting the project is unlikely to help. Check the project's exposed Data API schemas and PostgREST logs. ${messageOf(error)}`
   }
   return messageOf(error)
 }
@@ -416,6 +416,12 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
     setBusy(true)
     const uploaded: string[] = []
     try {
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
+      if (sessionError) throw new Error(`Could not verify your sign-in session: ${sessionError.message}`)
+      if (!sessionData.session || sessionData.session.user.id !== user.id) {
+        throw new Error('Your sign-in session has expired. Sign in again before submitting your application.')
+      }
+
       let photoSignatureMatches: boolean
       try {
         photoSignatureMatches = await matchesFileSignature(photo)
