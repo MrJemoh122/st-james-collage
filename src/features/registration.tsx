@@ -83,6 +83,20 @@ function relationValue<T>(value: Related<T> | undefined) {
   return Array.isArray(value) ? value[0] : value ?? undefined
 }
 
+function messageOf(error: unknown) {
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object') {
+    const values = [
+      'message' in error ? error.message : null,
+      'details' in error ? error.details : null,
+      'hint' in error ? error.hint : null,
+    ]
+    const messages = values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    if (messages.length) return messages.join(' ')
+  }
+  return 'Student application could not be submitted.'
+}
+
 function isAllowedPhoto(file: File) {
   return file.size > 0 && file.size <= maxFileSize && imageTypes.includes(file.type)
 }
@@ -359,7 +373,18 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
     setMessage('')
     setIsError(false)
     if (!supabase) return showError('Supabase is not configured.')
+    if (form.fullName.trim().length < 3) return showError('Enter your full legal name (at least 3 characters).')
+    if (form.phone.trim().length < 5) return showError('Enter a valid phone number.')
+    if (!form.dateOfBirth || form.dateOfBirth >= new Date().toISOString().slice(0, 10)) {
+      return showError('Enter a valid date of birth in the past.')
+    }
+    if (!['female', 'male', 'other', 'prefer_not_to_say'].includes(form.gender)) {
+      return showError('Choose a gender option.')
+    }
+    if (form.emergencyName.trim().length < 2) return showError('Enter an emergency contact name.')
+    if (form.emergencyPhone.trim().length < 5) return showError('Enter a valid emergency contact phone number.')
     if (!form.departmentId) return showError('Choose a department.')
+    if (form.address.trim().length < 5) return showError('Enter your home address (at least 5 characters).')
     if (!photo || !identity || !certificate) return showError('Add a photo, identity document, and academic certificate.')
     if (form.courseOfferingIds.length < 1) return showError('Choose at least one course offering.')
     if (form.courseOfferingIds.some((id) => !offerings.some((offering) =>
@@ -368,13 +393,6 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
     }
     if (otherDocuments.length > 6) return showError('You can upload up to six additional documents.')
     if (!isAllowedPhoto(photo)) return showError('Photo must be a JPEG, PNG, or WebP image no larger than 10 MB.')
-    let photoSignatureMatches: boolean
-    try {
-      photoSignatureMatches = await matchesFileSignature(photo)
-    } catch {
-      return showError('Could not read the selected photo. Please choose it again.')
-    }
-    if (!photoSignatureMatches) return showError('The selected photo does not match its file type.')
     const documents: ApplicationFile[] = [
       { file: identity, type: 'identity' },
       { file: certificate, type: 'certificate' },
@@ -384,19 +402,26 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
       return showError('Documents must be PDF, JPEG, PNG, or WebP and no larger than 10 MB each.')
     }
     if (documents.length > 8) return showError('Upload no more than eight documents.')
-    let documentSignaturesMatch: boolean
-    try {
-      documentSignaturesMatch = (await Promise.all(documents.map(({ file }) => matchesFileSignature(file)))).every(Boolean)
-    } catch {
-      return showError('Could not read the selected documents. Please choose them again.')
-    }
-    if (!documentSignaturesMatch) {
-      return showError('One or more documents do not match their file type.')
-    }
 
     setBusy(true)
     const uploaded: string[] = []
     try {
+      let photoSignatureMatches: boolean
+      try {
+        photoSignatureMatches = await matchesFileSignature(photo)
+      } catch {
+        throw new Error('Could not read the selected photo. Please choose it again.')
+      }
+      if (!photoSignatureMatches) throw new Error('The selected photo does not match its file type.')
+
+      let documentSignaturesMatch: boolean
+      try {
+        documentSignaturesMatch = (await Promise.all(documents.map(({ file }) => matchesFileSignature(file)))).every(Boolean)
+      } catch {
+        throw new Error('Could not read the selected documents. Please choose them again.')
+      }
+      if (!documentSignaturesMatch) throw new Error('One or more documents do not match their file type.')
+
       const photoPath = await uploadFile(user.id, 'student', 'photo', photo)
       uploaded.push(photoPath)
       const uploadedDocuments: UploadedDocument[] = []
@@ -425,10 +450,14 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
     } catch (error) {
       let cleanupMessage = ''
       if (uploaded.length) {
-        const cleanup = await supabase.storage.from(bucket).remove(uploaded)
-        if (cleanup.error) cleanupMessage = ` Uploaded files need cleanup: ${cleanup.error.message}`
+        try {
+          const cleanup = await supabase.storage.from(bucket).remove(uploaded)
+          if (cleanup.error) cleanupMessage = ` Uploaded files need cleanup: ${cleanup.error.message}`
+        } catch (cleanupError) {
+          cleanupMessage = ` Uploaded files need cleanup: ${messageOf(cleanupError)}`
+        }
       }
-      showError(`${error instanceof Error ? error.message : 'Student application could not be submitted.'}${cleanupMessage}`)
+      showError(`${messageOf(error)}${cleanupMessage}`)
     } finally {
       setBusy(false)
     }
@@ -446,7 +475,7 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
   )
 
   return (
-    <form className="space-y-5" onSubmit={submit}>
+    <form className="space-y-5" noValidate onSubmit={submit}>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Full legal name" required>
           <input className="form-input" autoComplete="name" maxLength={120} required value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} />
@@ -524,7 +553,7 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
       </div>
       {loadError && <FormMessage error message={loadError} />}
       <FormMessage error={isError} message={message} />
-      <button className="primary-button h-11 w-full justify-center sm:w-auto" disabled={busy || departments.length === 0 || departmentOfferings.length === 0} type="submit">
+      <button className="primary-button h-11 w-full justify-center sm:w-auto" disabled={busy || departments.length === 0} type="submit">
         {busy ? <><LoaderCircle className="animate-spin" size={16} /> Uploading application…</> : 'Submit student application'}
       </button>
       {departments.length === 0 && <p className="text-xs text-slate-500">Applications open when an administrator activates a department.</p>}
