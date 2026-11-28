@@ -100,7 +100,7 @@ function messageOf(error: unknown) {
 
 function applicationSubmissionError(error: unknown) {
   if (error && typeof error === 'object' && 'code' in error && error.code === 'PGRST202') {
-    return `Supabase's Data API could not resolve the student-application RPC for this signed-in request. The portal verified your session before submission, so rerunning the migration or restarting the project is unlikely to help. Check the project's exposed Data API schemas and PostgREST logs. ${messageOf(error)}`
+    return `Supabase's Data API could not resolve the student-application RPC in the public schema. Confirm the qualification course-offerings migration is applied and that public is exposed in the project's Data API schemas; then check PostgREST logs and refresh its schema cache if needed. ${messageOf(error)}`
   }
   return messageOf(error)
 }
@@ -447,7 +447,7 @@ function StudentApplicationForm({ user, onSubmitted }: Props & { onSubmitted: ()
         uploadedDocuments.push({ path, name: document.file.name, type: document.type })
       }
 
-      const { error } = await supabase.rpc('submit_college_student_application_with_qualification_preferences', {
+      const { error } = await supabase.schema('public').rpc('submit_college_student_application_with_qualification_preferences', {
         p_department_id: form.departmentId,
         p_full_name: form.fullName,
         p_phone: form.phone,
