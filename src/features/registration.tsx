@@ -100,7 +100,7 @@ function messageOf(error: unknown) {
 
 function applicationSubmissionError(error: unknown) {
   if (error && typeof error === 'object' && 'code' in error && error.code === 'PGRST202') {
-    return 'The student application function is missing from the Supabase API schema. Apply migration 20261128030000_qualification_course_offerings.sql, then reload the PostgREST schema cache.'
+    return "Supabase could not resolve the student-application RPC in its API schema. In the SQL Editor for this project, run NOTIFY pgrst, 'reload schema', then refresh the portal. If it persists, verify the function's argument names match the application RPC call."
   }
   return messageOf(error)
 }
