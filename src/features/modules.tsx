@@ -18,8 +18,9 @@ type Offering = {
   lecturer_id: string | null
   student_selection_open?: boolean
   course: Related<Pick<Course, 'id' | 'code' | 'name' | 'department_id'> & {
+    credit_hours?: number
     is_active?: boolean
-    department?: Related<Pick<Department, 'code' | 'name'>>
+    department?: Related<Pick<Department, 'code' | 'name'> & { is_active?: boolean }>
   }>
 }
 type LecturerCourseRosterRow = { student_number: string; full_name: string }
@@ -548,13 +549,14 @@ export function TimetablePage({ role, userId }: Props) {
   const [success, setSuccess] = useState('')
   const [editingId, setEditingId] = useState('')
   const [form, setForm] = useState({ course_offering_id: '', day_of_week: '1', starts_at: '09:00', ends_at: '10:00', room: '' })
+  const [generationForm, setGenerationForm] = useState({ department_id: '', academic_year: '', term: '' })
 
   const load = useCallback(async () => {
     if (!supabase) { setError('Supabase is not configured.'); setLoading(false); return }
     setLoading(true); setError('')
     try {
       const [offeringResult, enrollmentResult] = await Promise.all([
-        supabase.from('college_course_offerings').select('id,academic_year,term,section,lecturer_id,course:college_courses(id,code,name,department_id,department:college_departments(code,name))').order('academic_year', { ascending: false }),
+        supabase.from('college_course_offerings').select('id,academic_year,term,section,lecturer_id,course:college_courses(id,code,name,credit_hours,department_id,is_active,department:college_departments(code,name,is_active))').order('academic_year', { ascending: false }),
         role === 'student'
           ? supabase.from('college_enrollments').select('course_offering_id').eq('student_id', userId).eq('enrollment_status', 'enrolled')
           : Promise.resolve({ data: [], error: null }),
@@ -646,6 +648,39 @@ export function TimetablePage({ role, userId }: Props) {
     }
   }
 
+  async function generateDepartmentTimetable() {
+    if (!supabase || !canManage) return
+    const department = generationDepartments.find((item) => item.id === generationForm.department_id)
+    if (!department || !generationForm.academic_year || !generationForm.term) return
+    if (!window.confirm(
+      `Generate the ${department.name} timetable for ${generationForm.academic_year}, Term ${generationForm.term}, and enroll active students whose study year matches each subject? Existing timetable slots and enrollment records will be preserved.`,
+    )) return
+
+    setBusy(true); setError(''); setSuccess('')
+    try {
+      const { data, error: generationError } = await supabase.rpc('generate_department_timetable', {
+        p_department_id: generationForm.department_id,
+        p_academic_year: generationForm.academic_year,
+        p_term: Number(generationForm.term),
+      })
+      if (generationError) throw generationError
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('The timetable generator returned an invalid result.')
+      }
+
+      const result = data as { slots_created?: unknown; enrollments_created?: unknown }
+      if (!Number.isInteger(result.slots_created) || !Number.isInteger(result.enrollments_created)) {
+        throw new Error('The timetable generator returned incomplete counts.')
+      }
+      setSuccess(`Created ${result.slots_created} timetable slots and added ${result.enrollments_created} student-course enrollments. Existing timetable slots and enrollment records were preserved.`)
+      await load()
+    } catch (caught) {
+      setError(messageOf(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function cancelSlot(slot: Slot) {
     if (!supabase || !canManage || slot.slot_status === 'cancelled') return
     if (!window.confirm('Cancel this timetable entry? The entry will be retained in the timetable history.')) return
@@ -673,6 +708,26 @@ export function TimetablePage({ role, userId }: Props) {
     })
   }
 
+  const generationDepartments = offerings.reduce<Array<{ id: string; code: string; name: string }>>((departments, offering) => {
+    const course = related(offering.course)
+    const department = related(course?.department)
+    if (course && department && course.is_active !== false && department.is_active !== false
+      && !departments.some((item) => item.id === course.department_id)) {
+      departments.push({ id: course.department_id, code: department.code, name: department.name })
+    }
+    return departments
+  }, []).sort((left, right) => left.name.localeCompare(right.name))
+  const generationDepartmentOfferings = offerings.filter((offering) => {
+    const course = related(offering.course)
+    return course?.department_id === generationForm.department_id && course.is_active !== false
+  })
+  const generationAcademicYears = [...new Set(generationDepartmentOfferings.map((offering) => offering.academic_year))]
+    .sort((left, right) => right.localeCompare(left))
+  const generationTerms = [...new Set(generationDepartmentOfferings
+    .filter((offering) => offering.academic_year === generationForm.academic_year)
+    .map((offering) => offering.term))]
+    .sort((left, right) => left - right)
+
   const visibleSlots = slots.filter((slot) => {
     const offering = related(slot.offering)
     const course = related(offering?.course)
@@ -696,6 +751,28 @@ export function TimetablePage({ role, userId }: Props) {
         <Field label="End time"><TextInput onChange={(event) => setForm({ ...form, ends_at: event.target.value })} required type="time" value={form.ends_at} /></Field>
         <div className="flex items-center gap-2"><button className="primary-button self-end" disabled={busy || !offerings.length} type="submit"><Plus size={14} /> {editingId ? 'Save entry' : 'Add entry'}</button>{editingId && <button className="secondary-button self-end" onClick={() => { setEditingId(''); setForm({ course_offering_id: '', day_of_week: '1', starts_at: '09:00', ends_at: '10:00', room: '' }) }} type="button">Cancel edit</button>}</div>
       </form></Panel>}
+      {canManage && <Panel title="Generate timetable and enroll department students">
+        <p className="mb-4 text-sm text-slate-600 dark:text-slate-300">
+          Creates slots for active offerings that do not already have a scheduled slot. Classes use weekdays from 08:00 to 17:00, with a 1- or 2-hour duration based on subject credit hours, and the 33 lecture rooms, seminar rooms, and lecture theaters. Active students are enrolled when their department and study year match the subject. Existing slots and enrollment records are preserved.
+        </p>
+        <div className="mb-4 grid gap-3 sm:grid-cols-3">
+          <Field label="Department"><SelectInput onChange={(event) => setGenerationForm({ department_id: event.target.value, academic_year: '', term: '' })} required value={generationForm.department_id}>
+            <option value="">Select department</option>
+            {generationDepartments.map((department) => <option key={department.id} value={department.id}>{department.code} · {department.name}</option>)}
+          </SelectInput></Field>
+          <Field label="Academic year"><SelectInput disabled={!generationForm.department_id} onChange={(event) => setGenerationForm({ ...generationForm, academic_year: event.target.value, term: '' })} required value={generationForm.academic_year}>
+            <option value="">Select academic year</option>
+            {generationAcademicYears.map((year) => <option key={year} value={year}>{year}</option>)}
+          </SelectInput></Field>
+          <Field label="Term"><SelectInput disabled={!generationForm.academic_year} onChange={(event) => setGenerationForm({ ...generationForm, term: event.target.value })} required value={generationForm.term}>
+            <option value="">Select term</option>
+            {generationTerms.map((term) => <option key={term} value={term}>Term {term}</option>)}
+          </SelectInput></Field>
+        </div>
+        <button className="primary-button" disabled={busy || !generationForm.department_id || !generationForm.academic_year || !generationForm.term} onClick={() => void generateDepartmentTimetable()} type="button">
+          <Plus size={14} /> Generate timetable and enroll students
+        </button>
+      </Panel>}
       <Field label="Filter visible entries"><TextInput onChange={(event) => setFilter(event.target.value)} placeholder="Search subject, class, day or room" value={filter} /></Field>
       {loading ? <Loading /> : visibleSlots.length ? <Panel title={`Entries (${visibleSlots.length})`}><Table headers={['Day', 'Time', 'Department', 'Subject', 'Class', 'Lecturer', 'Room', 'Status', ...(canManage ? ['Actions'] : [])]}>{visibleSlots.map((slot) => {
         const offering = related(slot.offering)
