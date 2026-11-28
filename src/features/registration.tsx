@@ -4,6 +4,7 @@ import type { User } from '@supabase/supabase-js'
 import { CheckCircle2, FileText, ImagePlus, LoaderCircle, Plus, RefreshCw, ShieldCheck, Trash2, UserRound } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { parseStudyYears } from '../lib/studyYears'
+import { collegeLogoUrl } from '../lib/branding'
 
 const bucket = 'college-applications'
 const maxFileSize = 10 * 1024 * 1024
@@ -230,9 +231,7 @@ export function ApplicantPortal({ user, onRefresh }: Props) {
       <div className="mx-auto max-w-3xl">
         <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
           <div className="flex items-center gap-3">
-            <span className="grid h-11 w-11 place-items-center rounded-xl bg-indigo-600 text-white">
-              <UserRound size={21} />
-            </span>
+            <img alt="St James College crest" className="h-11 w-11 shrink-0 rounded-lg bg-white object-contain p-0.5" src={collegeLogoUrl} />
             <div>
               <p className="text-sm font-bold">St James College</p>
               <p className="text-xs text-slate-500">Applicant portal</p>

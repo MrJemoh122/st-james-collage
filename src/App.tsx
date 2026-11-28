@@ -31,6 +31,7 @@ import {
   X,
 } from 'lucide-react'
 import { supabase } from './lib/supabase'
+import { campusEntranceUrl, collegeLogoUrl } from './lib/branding'
 import { CreateAccount } from './features/account'
 import {
   ApplicantPortal,
@@ -304,9 +305,7 @@ function App() {
       >
         <div className="flex h-[76px] items-center justify-between border-b border-slate-100 px-6 dark:border-slate-800">
           <a className="flex items-center gap-3" href="#" onClick={() => navigate('Overview')}>
-            <span className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-600 text-white">
-              <GraduationCap size={22} strokeWidth={2.2} />
-            </span>
+            <img alt="St James College crest" className="h-10 w-10 shrink-0 rounded-lg bg-white object-contain p-0.5" src={collegeLogoUrl} />
             <span>
               <span className="block text-sm font-bold tracking-tight">St James</span>
               <span className="block text-[11px] text-slate-500">College management</span>
@@ -1421,14 +1420,18 @@ function SignIn() {
 
   return (
     <main className="grid min-h-screen bg-white dark:bg-slate-950 lg:grid-cols-[1.05fr_0.95fr]">
-      <section className="relative hidden overflow-hidden bg-[#101735] p-12 text-white lg:flex lg:flex-col lg:justify-between xl:p-16">
+      <section className="relative flex min-h-[260px] flex-col justify-between overflow-hidden bg-[#101735] p-6 text-white sm:min-h-[300px] sm:p-10 lg:min-h-screen lg:p-12 xl:p-16">
+        <div
+          aria-hidden="true"
+          className="absolute inset-0 bg-cover bg-center"
+          style={{ backgroundImage: `url("${campusEntranceUrl}")` }}
+        />
+        <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-br from-slate-950/75 via-slate-950/45 to-indigo-950/70" />
         <div className="absolute -right-32 -top-32 h-96 w-96 rounded-full border border-white/10" />
         <div className="absolute -right-16 -top-16 h-64 w-64 rounded-full border border-white/10" />
         <div className="absolute -bottom-48 -left-20 h-[480px] w-[480px] rounded-full bg-indigo-500/20 blur-3xl" />
-        <a className="relative flex items-center gap-3" href="#">
-          <span className="grid h-11 w-11 place-items-center rounded-xl bg-indigo-500 text-white">
-            <GraduationCap size={23} />
-          </span>
+        <a className="relative flex w-fit items-center gap-3" href="#">
+          <img alt="St James College crest" className="h-11 w-11 shrink-0 rounded-lg bg-white object-contain p-0.5" src={collegeLogoUrl} />
           <span>
             <span className="block text-sm font-bold">St James College</span>
             <span className="block text-xs text-slate-300">Institute of Technology</span>
@@ -1452,17 +1455,8 @@ function SignIn() {
         <p className="relative text-[11px] text-slate-400">© {new Date().getFullYear()} St James College Institute of Technology</p>
       </section>
 
-      <section className="flex min-h-screen items-center justify-center px-5 py-12 sm:px-10">
+      <section className="flex min-h-[65vh] items-center justify-center px-5 py-10 sm:px-10 sm:py-12 lg:min-h-screen">
         <div className="w-full max-w-[400px]">
-          <div className="mb-10 flex items-center gap-3 lg:hidden">
-            <span className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-600 text-white">
-              <GraduationCap size={22} />
-            </span>
-            <span>
-              <span className="block text-sm font-bold">St James College</span>
-              <span className="block text-xs text-slate-500">Institute of Technology</span>
-            </span>
-          </div>
           {creatingAccount ? (
             <CreateAccount onBack={() => setCreatingAccount(false)} />
           ) : (
