@@ -1420,24 +1420,25 @@ function SignIn() {
 
   return (
     <main className="grid min-h-screen bg-white dark:bg-slate-950 lg:grid-cols-[1.05fr_0.95fr]">
-      <section className="relative flex min-h-[260px] flex-col justify-between overflow-hidden bg-[#101735] p-6 text-white sm:min-h-[300px] sm:p-10 lg:min-h-screen lg:p-12 xl:p-16">
-        <div
-          aria-hidden="true"
-          className="absolute inset-0 bg-cover bg-center"
-          style={{ backgroundImage: `url("${campusEntranceUrl}")` }}
-        />
-        <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-br from-slate-950/75 via-slate-950/45 to-indigo-950/70" />
-        <div className="absolute -right-32 -top-32 h-96 w-96 rounded-full border border-white/10" />
-        <div className="absolute -right-16 -top-16 h-64 w-64 rounded-full border border-white/10" />
-        <div className="absolute -bottom-48 -left-20 h-[480px] w-[480px] rounded-full bg-indigo-500/20 blur-3xl" />
-        <a className="relative flex w-fit items-center gap-3" href="#">
+      <section className="relative flex min-h-[260px] flex-col justify-between overflow-hidden p-6 text-white sm:min-h-[300px] sm:p-10 lg:min-h-screen lg:p-12 xl:p-16">
+        <div aria-hidden="true" className="home-hero-image absolute inset-0 overflow-hidden bg-[#101735]">
+          <div
+            className="absolute inset-0 bg-cover bg-center"
+            style={{ backgroundImage: `url("${campusEntranceUrl}")` }}
+          />
+          <div className="absolute inset-0 bg-gradient-to-br from-slate-950/75 via-slate-950/45 to-indigo-950/70" />
+          <div className="absolute -right-32 -top-32 h-96 w-96 rounded-full border border-white/10" />
+          <div className="absolute -right-16 -top-16 h-64 w-64 rounded-full border border-white/10" />
+          <div className="absolute -bottom-48 -left-20 h-[480px] w-[480px] rounded-full bg-indigo-500/20 blur-3xl" />
+        </div>
+        <a className="relative z-10 flex w-fit items-center gap-3" href="#">
           <img alt="St James College crest" className="h-11 w-11 shrink-0 rounded-lg bg-white object-contain p-0.5" src={collegeLogoUrl} />
           <span>
             <span className="block text-sm font-bold">St James College</span>
             <span className="block text-xs text-slate-300">Institute of Technology</span>
           </span>
         </a>
-        <div className="relative max-w-lg">
+        <div className="relative z-10 max-w-lg">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-indigo-300">One connected campus</p>
           <h1 className="mt-5 text-4xl font-bold leading-tight tracking-tight xl:text-5xl">
             A clearer view of college life.
@@ -1452,7 +1453,7 @@ function SignIn() {
             Secure access for your college community
           </div>
         </div>
-        <p className="relative text-[11px] text-slate-400">© {new Date().getFullYear()} St James College Institute of Technology</p>
+        <p className="relative z-10 text-[11px] text-slate-400">© {new Date().getFullYear()} St James College Institute of Technology</p>
       </section>
 
       <section className="flex min-h-[65vh] items-center justify-center px-5 py-10 sm:px-10 sm:py-12 lg:min-h-screen">
