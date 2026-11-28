@@ -3,6 +3,7 @@ import type { FormEvent, ReactNode } from 'react'
 import type { User } from '@supabase/supabase-js'
 import { CheckCircle2, FileText, ImagePlus, LoaderCircle, Plus, RefreshCw, ShieldCheck, Trash2, UserRound } from 'lucide-react'
 import { supabase } from '../lib/supabase'
+import { parseStudyYears } from '../lib/studyYears'
 
 const bucket = 'college-applications'
 const maxFileSize = 10 * 1024 * 1024
@@ -38,6 +39,7 @@ type DepartmentSubject = {
   name: string
   credit_hours: number
   is_active: boolean
+  study_years: number[]
 }
 type CourseOfferingChoice = {
   id: string
@@ -554,7 +556,8 @@ export function DepartmentsPage({
   const [departments, setDepartments] = useState<Department[]>([])
   const [subjects, setSubjects] = useState<DepartmentSubject[]>([])
   const [ownDepartmentId, setOwnDepartmentId] = useState('')
-  const [subjectDrafts, setSubjectDrafts] = useState<Record<string, { code: string; name: string; creditHours: string }>>({})
+  const [subjectDrafts, setSubjectDrafts] = useState<Record<string, { code: string; name: string; creditHours: string; studyYears: string }>>({})
+  const [subjectYearDrafts, setSubjectYearDrafts] = useState<Record<string, string>>({})
   const [code, setCode] = useState('')
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
@@ -566,14 +569,15 @@ export function DepartmentsPage({
   const loadDepartments = useCallback(async () => {
     if (!supabase) return false
     setLoading(true)
-    const [departmentResult, subjectResult, staffResult] = await Promise.all([
+    const [departmentResult, subjectResult, subjectYearResult, staffResult] = await Promise.all([
       supabase.from('college_departments').select('id,code,name,is_active').order('name'),
       supabase.from('college_courses').select('id,department_id,code,name,credit_hours,is_active').order('code'),
+      supabase.from('college_course_study_years').select('course_id,study_year').order('study_year'),
       role === 'department_head'
         ? supabase.from('college_staff').select('department_id').eq('id', userId).maybeSingle()
         : Promise.resolve({ data: null, error: null }),
     ])
-    const error = departmentResult.error ?? subjectResult.error ?? staffResult.error
+    const error = departmentResult.error ?? subjectResult.error ?? subjectYearResult.error ?? staffResult.error
     if (error) {
       setIsError(true)
       setMessage(error.message)
@@ -582,11 +586,20 @@ export function DepartmentsPage({
     }
     const departmentId = staffResult.data?.department_id ?? ''
     const allDepartments = departmentResult.data ?? []
+    const studyYearsByCourse = new Map<string, number[]>()
+    for (const assignment of subjectYearResult.data ?? []) {
+      const years = studyYearsByCourse.get(assignment.course_id) ?? []
+      years.push(Number(assignment.study_year))
+      studyYearsByCourse.set(assignment.course_id, years)
+    }
     setOwnDepartmentId(departmentId)
     setDepartments(role === 'department_head' && departmentId
       ? allDepartments.filter((department) => department.id === departmentId)
       : allDepartments)
-    setSubjects(subjectResult.data ?? [])
+    setSubjects((subjectResult.data ?? []).map((subject) => ({
+      ...subject,
+      study_years: studyYearsByCourse.get(subject.id) ?? [],
+    })))
     setMessage('')
     setLoading(false)
     return true
@@ -676,36 +689,81 @@ export function DepartmentsPage({
       setMessage('You can only add subjects to your assigned department.')
       return
     }
-    const draft = subjectDrafts[department.id] ?? { code: '', name: '', creditHours: '1' }
+    const draft = subjectDrafts[department.id] ?? { code: '', name: '', creditHours: '1', studyYears: '1' }
     const subjectCode = draft.code.trim().toUpperCase()
     const subjectName = draft.name.trim()
     const creditHours = Number(draft.creditHours)
-    if (!subjectCode || !subjectName || !Number.isInteger(creditHours) || creditHours < 1) {
+    const studyYears = parseStudyYears(draft.studyYears)
+    if (!subjectCode || !subjectName || !Number.isInteger(creditHours) || creditHours < 1
+      || !studyYears?.length) {
       setIsError(true)
-      setMessage('Enter a subject code, subject name, and valid credit hours.')
+      setMessage('Enter a subject code, name, valid credit hours, and at least one study year from 1 to 20.')
       return
     }
 
     setBusy(true)
     setMessage('')
-    const { error } = await supabase.from('college_courses').insert({
+    const { data: createdSubject, error } = await supabase.from('college_courses').insert({
       department_id: department.id,
       code: subjectCode,
       name: subjectName,
       credit_hours: creditHours,
-    })
-    setBusy(false)
+    }).select('id').single()
     if (error) {
+      setBusy(false)
       setIsError(true)
       setMessage(error.code === '23505'
         ? `Subject code "${subjectCode}" already exists. Choose a unique code.`
         : error.message)
       return
     }
-    setSubjectDrafts((current) => ({ ...current, [department.id]: { code: '', name: '', creditHours: '1' } }))
+    const { error: yearError } = await supabase.rpc('set_college_course_study_years', {
+      p_course_id: createdSubject.id,
+      p_study_years: studyYears,
+    })
+    setBusy(false)
+    if (yearError) {
+      setIsError(true)
+      setMessage(`Subject created, but study-year assignment failed: ${yearError.message}`)
+      await loadDepartments()
+      return
+    }
+    setSubjectDrafts((current) => ({ ...current, [department.id]: { code: '', name: '', creditHours: '1', studyYears: '1' } }))
     setIsError(false)
-    setMessage(`Subject added to ${department.name}.`)
+    setMessage(`Subject added to ${department.name} for year${studyYears.length === 1 ? '' : 's'} ${studyYears.join(', ')}.`)
     await loadDepartments()
+  }
+
+  async function saveSubjectYears(subject: DepartmentSubject) {
+    if (!supabase || !canManageSubjects) return
+    if (role === 'department_head' && subject.department_id !== ownDepartmentId) {
+      setIsError(true)
+      setMessage('You can only assign study years to subjects in your assigned department.')
+      return
+    }
+    const years = parseStudyYears(subjectYearDrafts[subject.id] ?? subject.study_years.join(', '))
+    if (!years) {
+      setIsError(true)
+      setMessage('Enter unique study years from 1 to 20, separated by commas.')
+      return
+    }
+    setBusy(true)
+    setMessage('')
+    const { error } = await supabase.rpc('set_college_course_study_years', {
+      p_course_id: subject.id,
+      p_study_years: years,
+    })
+    setBusy(false)
+    if (error) {
+      setIsError(true)
+      setMessage(error.message)
+      return
+    }
+    await loadDepartments()
+    setIsError(false)
+    setMessage(years.length
+      ? `Study years updated for ${subject.code}.`
+      : `${subject.code} is hidden from students until study years are assigned.`)
   }
 
   async function deleteSubject(subject: DepartmentSubject) {
@@ -784,7 +842,7 @@ export function DepartmentsPage({
       <div>
         <p className="text-xs font-medium text-slate-500">Academic structure</p>
         <h2 className="mt-1 text-2xl font-bold tracking-tight">Departments</h2>
-        <p className="mt-2 text-sm text-slate-500">Manage departments and their subjects. Students can view active subjects for their department in Academics.</p>
+        <p className="mt-2 text-sm text-slate-500">Assign each subject to study years. Students see active subjects assigned to their department and current year.</p>
       </div>
       {canManage && (
         <form className="mt-6 grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 sm:grid-cols-[1fr_2fr_auto] sm:items-end dark:border-slate-800 dark:bg-slate-900" onSubmit={addDepartment}>
@@ -804,7 +862,7 @@ export function DepartmentsPage({
         <div className="mt-4 grid gap-4 xl:grid-cols-2">
           {departments.map((department) => {
             const departmentSubjects = subjects.filter((subject) => subject.department_id === department.id)
-            const draft = subjectDrafts[department.id] ?? { code: '', name: '', creditHours: '1' }
+            const draft = subjectDrafts[department.id] ?? { code: '', name: '', creditHours: '1', studyYears: '1' }
             return (
               <section key={department.id} className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
                 <header className="flex flex-wrap items-start gap-3">
@@ -829,11 +887,35 @@ export function DepartmentsPage({
 
                 <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
                   {departmentSubjects.length ? departmentSubjects.map((subject) => (
-                    <div key={subject.id} className="flex items-center gap-3 py-3">
+                    <div key={subject.id} className="flex flex-wrap items-center gap-3 py-3">
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-xs font-semibold">{subject.code} · {subject.name}</p>
-                        <p className="mt-1 text-[10px] text-slate-500">{subject.credit_hours} credit hours · {subject.is_active ? 'Active' : 'Inactive'}</p>
+                        <p className="mt-1 text-[10px] text-slate-500">{subject.credit_hours} credit hours · {subject.is_active ? 'Active' : 'Inactive'} · {subject.study_years.length ? `Years ${subject.study_years.join(', ')}` : 'No study years assigned'}</p>
                       </div>
+                      {canManageSubjects && (
+                        <div className="flex items-end gap-2">
+                          <Field label="Study years">
+                            <input
+                              className="form-input w-32"
+                              aria-label={`Study years for ${subject.code}`}
+                              placeholder="1, 2"
+                              value={subjectYearDrafts[subject.id] ?? subject.study_years.join(', ')}
+                              onChange={(event) => setSubjectYearDrafts((current) => ({
+                                ...current,
+                                [subject.id]: event.target.value,
+                              }))}
+                            />
+                          </Field>
+                          <button
+                            className="secondary-button justify-center"
+                            disabled={busy}
+                            onClick={() => void saveSubjectYears(subject)}
+                            type="button"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      )}
                       {canManageSubjects && (
                         <button
                           aria-label={`Delete ${subject.code} ${subject.name}`}
@@ -850,7 +932,7 @@ export function DepartmentsPage({
                 </div>
 
                 {canManageSubjects && (
-                  <form className="mt-4 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-[1fr_2fr_100px_auto] sm:items-end dark:border-slate-800" onSubmit={(event) => void addSubject(event, department)}>
+                  <form className="mt-4 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-[1fr_1.5fr_90px_1fr_auto] sm:items-end dark:border-slate-800" onSubmit={(event) => void addSubject(event, department)}>
                     <Field label="Subject code" required>
                       <input className="form-input uppercase" maxLength={40} required value={draft.code} onChange={(event) => setSubjectDrafts((current) => ({
                         ...current,
@@ -867,6 +949,12 @@ export function DepartmentsPage({
                       <input className="form-input" max="100" min="1" required type="number" value={draft.creditHours} onChange={(event) => setSubjectDrafts((current) => ({
                         ...current,
                         [department.id]: { ...draft, creditHours: event.target.value },
+                      }))} />
+                    </Field>
+                    <Field label="Study years" required>
+                      <input className="form-input" maxLength={60} placeholder="1, 2" required value={draft.studyYears} onChange={(event) => setSubjectDrafts((current) => ({
+                        ...current,
+                        [department.id]: { ...draft, studyYears: event.target.value },
                       }))} />
                     </Field>
                     <button className="primary-button h-10 justify-center" disabled={busy} type="submit">

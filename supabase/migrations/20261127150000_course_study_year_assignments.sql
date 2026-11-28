@@ -6,12 +6,6 @@ CREATE TABLE IF NOT EXISTS public.college_course_study_years (
   PRIMARY KEY (course_id, study_year)
 );
 
-INSERT INTO public.college_course_study_years (course_id, study_year)
-SELECT course.id, years.study_year::smallint
-FROM public.college_courses AS course
-CROSS JOIN generate_series(1, 20) AS years(study_year)
-ON CONFLICT DO NOTHING;
-
 ALTER TABLE public.college_course_study_years ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON TABLE public.college_course_study_years
@@ -54,19 +48,94 @@ CREATE POLICY college_course_study_years_manage
     )
   );
 
+CREATE OR REPLACE FUNCTION public.set_college_course_study_years(
+  p_course_id uuid,
+  p_study_years smallint[]
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  course_department_id uuid;
+BEGIN
+  IF auth.uid() IS NULL
+     OR NOT (
+       public.stj_has_role(
+         ARRAY['super_admin', 'college_admin', 'academic_registrar']::public.stj_college_role[]
+       )
+       OR public.stj_has_role(ARRAY['department_head']::public.stj_college_role[])
+     ) THEN
+    RAISE EXCEPTION 'You are not allowed to assign subject study years'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF p_study_years IS NULL
+     OR EXISTS (
+       SELECT 1
+       FROM pg_catalog.unnest(p_study_years) AS selected(study_year)
+       WHERE selected.study_year IS NULL
+          OR selected.study_year < 1
+          OR selected.study_year > 20
+     )
+     OR EXISTS (
+       SELECT selected.study_year
+       FROM pg_catalog.unnest(p_study_years) AS selected(study_year)
+       GROUP BY selected.study_year
+       HAVING pg_catalog.count(*) > 1
+     ) THEN
+    RAISE EXCEPTION 'Choose unique study years between 1 and 20';
+  END IF;
+
+  SELECT course.department_id
+    INTO course_department_id
+    FROM public.college_courses AS course
+    WHERE course.id = p_course_id
+    FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'The subject does not exist';
+  END IF;
+
+  IF NOT public.stj_has_role(
+       ARRAY['super_admin', 'college_admin', 'academic_registrar']::public.stj_college_role[]
+     )
+     AND course_department_id IS DISTINCT FROM public.stj_staff_department_id(auth.uid()) THEN
+    RAISE EXCEPTION 'You can only assign study years to subjects in your department'
+      USING ERRCODE = '42501';
+  END IF;
+
+  DELETE FROM public.college_course_study_years
+    WHERE course_id = p_course_id;
+
+  INSERT INTO public.college_course_study_years (course_id, study_year)
+  SELECT p_course_id, selected.study_year
+    FROM pg_catalog.unnest(p_study_years) AS selected(study_year);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.set_college_course_study_years(uuid, smallint[])
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.set_college_course_study_years(uuid, smallint[])
+  TO authenticated;
+
 DROP POLICY IF EXISTS college_courses_read ON public.college_courses;
 CREATE POLICY college_courses_read
   ON public.college_courses FOR SELECT TO authenticated
   USING (
-    NOT public.stj_has_role(
-      ARRAY['student', 'pending']::public.stj_college_role[]
+    (
+      NOT public.stj_has_role(
+        ARRAY['student', 'pending']::public.stj_college_role[]
+      )
     )
     OR (
       public.stj_has_role(ARRAY['pending']::public.stj_college_role[])
       AND EXISTS (
         SELECT 1
-        FROM public.college_course_study_years AS course_year
-        WHERE course_year.course_id = college_courses.id
+        FROM public.college_course_offerings AS offering
+        WHERE offering.course_id = college_courses.id
+          AND offering.student_selection_open
+          AND college_courses.is_active
       )
     )
     OR (
